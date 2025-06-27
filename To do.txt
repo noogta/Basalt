@@ -4,10 +4,20 @@ IMPORTANT
 Inversement trace
 Scope
 Réduir la taille du blanc export
-
+Revenir dans le dernier dossier
 
 A VOIR
 Déconvolution
 Arrière plan export
+Kirchoff 
 
 Trace mean : trait blanc ou noir
+
+Interpolation
+
+Découpage fichier flex
+
+Passer en web ?
+
+Trier la liste
+3D

@@ -15,7 +15,7 @@ from scipy.ndimage import uniform_filter1d
 
 import sys
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QPushButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem
+from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox
 from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtGui import QDoubleValidator, QValidator
@@ -67,6 +67,8 @@ class TraitementValues:
     unit_x: str = "Distance (m)"
     unit_y: str = "Profondeur (m)"
 
+    profile_direction_mode: str = 'normal' # Options: 'normal', 'mirror_all', 'mirror_serpentine'
+    
  
 class Const():
     def __init__(self):
@@ -682,6 +684,25 @@ class MainWindow():
         self.line_edit_y_ticks.editingFinished.connect(self.on_y_ticks_edited)
         self.line_edit_y_ticks.returnPressed.connect(self.on_y_ticks_edited)
         
+
+        direction_groupbox = QGroupBox("Sens du Profil")
+        direction_layout = QVBoxLayout(direction_groupbox)
+
+        self.radio_direction_normal = QRadioButton("Normal (par défaut)")
+        self.radio_direction_normal.setChecked(True)
+        self.radio_direction_mirror_all = QRadioButton("Inverser tous les profils (Miroir)")
+        self.radio_direction_serpentine = QRadioButton("Inverser un profil sur deux (Serpentin)")
+        
+        # On connecte le signal 'toggled' de CHAQUE bouton à la MÊME fonction
+        self.radio_direction_normal.toggled.connect(self.on_direction_mode_changed)
+        self.radio_direction_mirror_all.toggled.connect(self.on_direction_mode_changed)
+        self.radio_direction_serpentine.toggled.connect(self.on_direction_mode_changed)
+
+        direction_layout.addWidget(self.radio_direction_normal)
+        direction_layout.addWidget(self.radio_direction_mirror_all)
+        direction_layout.addWidget(self.radio_direction_serpentine)
+        options_layout.addWidget(direction_groupbox)
+
         options_layout.addStretch() # Pousse tout vers le haut
         return options_widget
 
@@ -714,34 +735,47 @@ class MainWindow():
             # En cas d'autre erreur (ex: "abc"), retourne la valeur par défaut
             return default_on_error
     
+   # DANS LA CLASSE MainWindow
+
     def on_file_clicked(self, item):
-        """Gère le clic sur un élément de la liste."""
+        """
+        Gère le clic sur un élément de la liste de manière robuste en utilisant l'index.
+        """
         print(f"Élément sélectionné: {item.text()}")
+        
+        # 1. On récupère la liste de fichiers exactement comme elle est affichée
+        current_files_in_list = self.basalt.getFilesFiltered(
+            self.constante.getFiltreFreq(self.combo_box_frequence.currentText()),
+            self.basalt.getFilesInFolder(self.constante.getFiltreExtension(self.combo_box_extension.currentText()))
+        )
 
-        for file in self.basalt.getFilesFiltered(self.constante.getFiltreFreq(self.combo_box_frequence.currentText()),
-                    self.basalt.getFilesInFolder(self.constante.getFiltreExtension(self.combo_box_extension.currentText()))):
-            if file.stem == item.text():
-                # 1. Charger le fichier (ceci remplit les bonnes valeurs dans Basalt)
-                self.basalt.setSelectedFile(file, self.constante.getRadarByExtension(self.combo_box_extension.currentText()))
-                header = self.basalt.data.header
+        # 2. On obtient l'index (le numéro de ligne) de l'élément sur lequel l'utilisateur a cliqué
+        row = self.listFile_widget.row(item)
+        
+        # 3. On vérifie que cet index est valide et on récupère le bon fichier directement
+        if 0 <= row < len(current_files_in_list):
+            file_to_process = current_files_in_list[row]
+            
+            print(f"Fichier correspondant trouvé par index ({row}) : {file_to_process.name}")
+            
+            # 4. On charge le fichier en passant son index pour le mode serpentin
+            self.basalt.setSelectedFile(file_to_process, self.constante.getRadarByExtension(file_to_process.suffix), row)
+            
+            # 5. On met à jour les champs de l'UI avec les infos du nouveau fichier
+            header = self.basalt.data.header
+            self.line_edit_freq_filtre.setText(f"{header.sampling_frequency / 1e6:.2f}")
+            self.line_edit_antenna_freq.setText(f"{header.antenna_frequency:.1f}")
+            self.line_edit_xlim.setPlaceholderText(f"Max: {header.value_trace}")
+            self.line_edit_ylim.setPlaceholderText(f"Max: {header.value_sample}")
 
-                # Mettre à jour les fréquences
-                self.line_edit_freq_filtre.setText(f"{header.sampling_frequency / 1e6:.2f}")
-                self.line_edit_antenna_freq.setText(f"{header.antenna_frequency:.1f}")
-
-                # Mettre à jour les placeholders des limites pour guider l'utilisateur
-                self.line_edit_xlim.setPlaceholderText(f"Max: {header.value_trace}")
-                self.line_edit_ylim.setPlaceholderText(f"Max: {header.value_sample}")
-
-                # 3. Forcer la re-lecture des valeurs des champs de limites actuels
-                # En appelant les handlers, on s'assure que les valeurs de l'UI
-                # sont bien celles utilisées pour le traitement.
-                self.on_x0_edited()
-                self.on_xlim_edited()
-                self.on_y0_edited()
-                self.on_ylim_edited() # Cet appel va déclencher le update_display final
-                return
-        return None
+            # 6. On force la re-lecture des valeurs de l'UI pour les appliquer au nouveau fichier
+            self.on_x0_edited()
+            self.on_xlim_edited()
+            self.on_y0_edited()
+            self.on_ylim_edited() # Cet appel déclenche le update_display final
+        else:
+            print("Erreur : Impossible de retrouver le fichier correspondant à l'élément cliqué.")
+            
     def on_mouse_move(self, event):
         """
         Gère les événements de mouvement de la souris sur le canvas Matplotlib.
@@ -924,6 +958,20 @@ class MainWindow():
         self.basalt.traitementValues.Y_ticks = valeur
         self.update_display()
 
+    def on_direction_mode_changed(self):
+        """Met à jour le mode de direction du profil et rafraîchit l'affichage."""
+        new_mode = 'normal' # Valeur par défaut
+        if self.radio_direction_mirror_all.isChecked():
+            new_mode = 'mirror_all'
+        elif self.radio_direction_serpentine.isChecked():
+            new_mode = 'mirror_serpentine'
+            
+        # Si le mode a réellement changé, on met à jour et on rafraîchit
+        if self.basalt.traitementValues.profile_direction_mode != new_mode:
+            self.basalt.traitementValues.profile_direction_mode = new_mode
+            print(f"Mode de direction du profil changé en : {new_mode}")
+            self.update_display()
+
     def open_folder(self):
         selected_folder = QFileDialog.getExistingDirectory(self.window, "Ouvrir un dossier")
         self.basalt.setFolder(selected_folder)
@@ -1043,6 +1091,8 @@ class Basalt():
 
         self.epsilon :float = 8 
 
+        self.current_file_index: int = 0
+
     def setFolder(self,folder:str):
         if os.path.isdir(folder):
             self.folder = folder
@@ -1068,10 +1118,11 @@ class Basalt():
         return [f for f in files if Path(f).stem.endswith(key)]
 
     
-    def setSelectedFile(self, GPR_File:Path, radar : Radar):
+    def setSelectedFile(self, GPR_File:Path, radar : Radar, index_in_list: int = 0):
 
         self.antenna = radar
         self.selectedFile = GPR_File
+        self.current_file_index = index_in_list
         self.data = RadarData(GPR_File,radar)
 
         # On garde la détection automatique des fréquences
@@ -1099,6 +1150,22 @@ class Basalt():
         if self.traitementValues.is_filtre_freq : 
             self.traitement.filtre_frequence(self.traitementValues.antenna_freq, 
                                           self.traitementValues.sampling_freq)
+
+        # --- LOGIQUE D'INVERSION MIROIR ---
+        mode = self.traitementValues.profile_direction_mode
+        should_mirror = False
+        
+        if mode == 'mirror_all':
+            should_mirror = True
+        elif mode == 'mirror_serpentine':
+            # On inverse les traces paires (index 1, 3, 5...)
+            # La 1ère trace est à l'index 0 (impaire), la 2ème à 1 (paire), etc.
+            if self.current_file_index % 2 == 1:
+                should_mirror = True
+                
+        if should_mirror:
+            self.traitement.apply_mirror()
+        # --- FIN DE LA LOGIQUE ---
 
         self.traitement.apply_total_gain(t0_exp = self.traitementValues.t0_exp,
                                           t0_lin = self.traitementValues.t0_lin,
@@ -1590,6 +1657,18 @@ class Traitement():
         except Exception as e:
             print(f"Erreur lors de l'application du filtre passe-bande: {e}")
 
+    def apply_mirror(self):
+        """
+        Inverse l'ordre des traces sur l'axe horizontal (effet miroir).
+        """
+        print("Application de l'effet miroir sur les traces.")
+        
+        # Le slicing [:, ::-1] signifie :
+        # : -> prend toutes les lignes (tous les samples)
+        # ::-1 -> prend toutes les colonnes (les traces) mais avec un pas de -1,
+        # ce qui inverse leur ordre.
+        self.data = self.data[:, ::-1]
+
 class Graphique():
     def __init__(self, ax : plt.Axes, fig : Figure):
         self.vmin = -5e9
@@ -1609,7 +1688,7 @@ class Graphique():
         titre_complet = "Scan : " + title
         
         if self.im is None:
-            self.im = self.ax.imshow(data, cmap="gray", aspect="auto", interpolation='nearest', extent=extent)
+            self.im = self.ax.imshow(data, cmap="gray", aspect="auto", interpolation='bicubic', extent=extent)
             self.fig.suptitle(titre_complet, y=0.05, fontsize=12)
             self.ax.xaxis.set_label_position('top')
             self.ax.xaxis.set_ticks_position('top')
