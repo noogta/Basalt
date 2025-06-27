@@ -1,0 +1,13 @@
+
+IMPORTANT
+
+Inversement trace
+Scope
+Réduir la taille du blanc export
+
+
+A VOIR
+Déconvolution
+Arrière plan export
+
+Trace mean : trait blanc ou noir
