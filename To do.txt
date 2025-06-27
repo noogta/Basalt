@@ -1,23 +1,22 @@
 
 IMPORTANT
-
-Inversement trace
-Scope
-Réduir la taille du blanc export
-Revenir dans le dernier dossier
+    Kirchoff 
 
 A VOIR
-Déconvolution
-Arrière plan export
-Kirchoff 
+    Déconvolution
+    Arrière plan export
+    Trace mean : trait blanc ou noir
+    Interpolation
+    Découpage fichier flex
+    Passer en web ?
+    3D
+    Export par tranche
+    Scope
+    Afficher %valeur
 
-Trace mean : trait blanc ou noir
-
-Interpolation
-
-Découpage fichier flex
-
-Passer en web ?
-
-Trier la liste
-3D
+FAIT
+    Inversement trace
+    Trier la liste
+    Réduir la taille du blanc export
+    Echelle
+    Revenir dans le dernier dossier

@@ -14,13 +14,16 @@ from math import sqrt, floor
 from scipy.ndimage import uniform_filter1d
 
 import sys
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox
+from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter
 from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtGui import QDoubleValidator, QValidator
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from typing import Union
+
+ORGANIZATION_NAME = "HIF"
+APPLICATION_NAME = "BasaltGPR"
 
 cste_global = {
     "c_lum": 299792458, # Vitesse de la lumière dans le vide en m/s
@@ -118,6 +121,7 @@ class AcceptEmptyDoubleValidator(QDoubleValidator):
     
 class MainWindow():
     def __init__(self, softwarename:str):
+        
         self.constante = Const()
 
         # Création de notre fenêtre principale
@@ -127,8 +131,17 @@ class MainWindow():
         
         self.basalt :Basalt = Basalt()
         
-        # UI 
         self.window.setGeometry(100, 100, 1600, 900)
+        settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
+
+        geometry = settings.value("geometry")
+        if geometry:
+            self.window.restoreGeometry(geometry)
+
+        last_folder = settings.value("last_folder", "") # "" est la valeur par défaut
+        self.basalt.last_used_folder = last_folder
+
+        # UI 
         self.window.central_widget = QWidget()
         self.window.setCentralWidget(self.window.central_widget)
         self.main_layout = QHBoxLayout(self.window.central_widget)
@@ -144,23 +157,51 @@ class MainWindow():
 
         self.menu()
 
-        # --- CRÉATION DU GRAPHIQUE (PANNEAU DE DROITE) ---
+        # 1. On crée un QSplitter horizontal. C'est notre nouveau conteneur.
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # 2. On crée les graphiques comme avant
         self.fig = Figure(figsize=(12, 10), dpi=100)
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111)
         self.radargramme = Graphique(self.ax, self.fig)
 
-                # --- AJOUT DES DEUX PANNEAUX AU LAYOUT PRINCIPAL ---
-        # 1. On ajoute le panneau de contrôle (qui contient tous les petits widgets)
-        self.main_layout.addWidget(self.control_panel_widget)
+        self.trace_fig = Figure(figsize=(2, 10), dpi=100)
+        self.trace_canvas = FigureCanvas(self.trace_fig)
+        self.trace_ax = self.trace_fig.add_subplot(111)
+        self.trace_plot = Graphique(self.trace_ax, self.trace_fig)
 
-        # 2. On ajoute le canvas du graphique
-        self.main_layout.addWidget(self.canvas)
+        # 3. On ajoute directement les canevas au splitter
+        self.splitter.addWidget(self.canvas)
+        self.splitter.addWidget(self.trace_canvas)
+
+        # 4. On peut toujours définir des proportions de départ
+        # Le splitter les respectera au premier affichage.
+        self.splitter.setStretchFactor(0, 4)
+        self.splitter.setStretchFactor(1, 1)
+
+        # 5. On assemble la fenêtre principale
+        self.main_layout.addWidget(self.control_panel_widget) # Bloc de gauche
+        self.main_layout.addWidget(self.splitter)            # Bloc de droite (maintenant le splitter)
+        self.window.closeEvent = self.closeEvent
+
+
+    def closeEvent(self, event):
+        """
+        Cette méthode est automatiquement appelée par Qt juste avant que la fenêtre ne se ferme.
+        C'est l'endroit parfait pour sauvegarder nos paramètres.
+        """
+        print("Fermeture de l'application, sauvegarde des paramètres...")
+        settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
         
-        self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
-        # Donne plus d'espace au graphique quand la fenêtre est redimensionnée.
-        #self.main_layout.setStretchFactor(0, 1) # Index 0 : control_panel_widget
-        #self.main_layout.setStretchFactor(1, 3) # Index 1 : canvas
+        # Sauvegarde de la géométrie de la fenêtre
+        settings.setValue("geometry", self.window.saveGeometry())
+        
+        # Sauvegarde du dernier dossier utilisé
+        settings.setValue("last_folder", self.basalt.last_used_folder)
+        
+        # On accepte l'événement de fermeture pour que l'application se ferme normalement
+        event.accept()
 
     def show(self):
         self.window.show()
@@ -396,7 +437,6 @@ class MainWindow():
 
         # Ajoutez un espaceur pour pousser les éléments vers le haut si nécessaire
         self.control_layout.addStretch()
-    
 
     def redraw_plot(self):
         """
@@ -707,11 +747,16 @@ class MainWindow():
         return options_widget
 
     def populate_listFile_widget(self):
-        """Remplit le QListWidget avec les chaînes de caractères de gpr_data_array."""
-        self.listFile_widget.clear() # S'assurer que la liste est vide avant de la remplir
+        """Remplit le QListWidget avec les noms de fichiers, triés numériquement."""
+        self.listFile_widget.clear()
+
+        # On fait un seul appel à notre nouvelle fonction intelligente
+        sorted_files = self.basalt.getFilesFiltered(
+            extension_filter=self.constante.getFiltreExtension(self.combo_box_extension.currentText()),
+            freq_key=self.constante.getFiltreFreq(self.combo_box_frequence.currentText())
+        )
         
-        for file in self.basalt.getFilesFiltered(self.constante.getFiltreFreq(self.combo_box_frequence.currentText()),
-                        self.basalt.getFilesInFolder(self.constante.getFiltreExtension(self.combo_box_extension.currentText()))):
+        for file in sorted_files:
             list_item = QListWidgetItem(file.stem)
             self.listFile_widget.addItem(list_item)
     
@@ -735,8 +780,6 @@ class MainWindow():
             # En cas d'autre erreur (ex: "abc"), retourne la valeur par défaut
             return default_on_error
     
-   # DANS LA CLASSE MainWindow
-
     def on_file_clicked(self, item):
         """
         Gère le clic sur un élément de la liste de manière robuste en utilisant l'index.
@@ -745,17 +788,16 @@ class MainWindow():
         
         # 1. On récupère la liste de fichiers exactement comme elle est affichée
         current_files_in_list = self.basalt.getFilesFiltered(
-            self.constante.getFiltreFreq(self.combo_box_frequence.currentText()),
-            self.basalt.getFilesInFolder(self.constante.getFiltreExtension(self.combo_box_extension.currentText()))
+            extension_filter=self.constante.getFiltreExtension(self.combo_box_extension.currentText()),
+            freq_key=self.constante.getFiltreFreq(self.combo_box_frequence.currentText())
         )
 
-        # 2. On obtient l'index (le numéro de ligne) de l'élément sur lequel l'utilisateur a cliqué
         row = self.listFile_widget.row(item)
         
         # 3. On vérifie que cet index est valide et on récupère le bon fichier directement
         if 0 <= row < len(current_files_in_list):
             file_to_process = current_files_in_list[row]
-            
+        
             print(f"Fichier correspondant trouvé par index ({row}) : {file_to_process.name}")
             
             # 4. On charge le fichier en passant son index pour le mode serpentin
@@ -973,9 +1015,28 @@ class MainWindow():
             self.update_display()
 
     def open_folder(self):
-        selected_folder = QFileDialog.getExistingDirectory(self.window, "Ouvrir un dossier")
-        self.basalt.setFolder(selected_folder)
-        self.populate_listFile_widget()
+        """
+        Ouvre une boîte de dialogue pour choisir un dossier, en commençant
+        par le dernier dossier utilisé lors de la session précédente.
+        """
+        # 1. On détermine le chemin de départ pour la boîte de dialogue.
+        # On essaie d'abord de prendre le dernier dossier mémorisé.
+        start_path = self.basalt.last_used_folder 
+        
+        # 2. Si aucun dossier n'a été mémorisé (au tout premier lancement),
+        # on utilise le dossier personnel de l'utilisateur comme alternative.
+        if not start_path or not os.path.isdir(start_path):
+            start_path = str(Path.home())
+
+        # 3. On ouvre la boîte de dialogue en lui passant ce chemin de départ.
+        selected_folder = QFileDialog.getExistingDirectory(self.window, 
+                                                        "Sélectionner le dossier qui contient les traces GPR",
+                                                        start_path) 
+        
+        # Le reste de la fonction est inchangé
+        if selected_folder:
+            self.basalt.setFolder(selected_folder)
+            self.populate_listFile_widget()
         
     def exportPNG(self):
         """
@@ -1077,6 +1138,7 @@ class MainWindow():
 class Basalt():
     def __init__(self):
         self.folder :str = ""
+        self.last_used_folder: str = "" 
         self.data : RadarData = None
         self.traitement : Traitement = None
         self.selectedFile : Path = None
@@ -1096,6 +1158,7 @@ class Basalt():
     def setFolder(self,folder:str):
         if os.path.isdir(folder):
             self.folder = folder
+            self.last_used_folder = folder
         else: 
             self.folder = None 
             
@@ -1109,13 +1172,36 @@ class Basalt():
         else:
             return None
         
-    def getFilesFiltered(self, key:str = None, files = []):
+    def getFilesFiltered(self, extension_filter: str, freq_key: str = None):
         """
-            Permet de filtrer la liste des fichiers dans le dossier selon une clef de recherche
-            Ex : _1 en key pour chercher la haute fréquence de Mala
+        Récupère les fichiers du dossier, les filtre par extension et par clef de fréquence,
+        puis les trie numériquement.
+        
+        Args:
+            extension_filter (str): Le filtre d'extension (ex: "*.dzt").
+            freq_key (str, optional): La clef de fréquence (ex: "_1"). Defaults to None.
+        
+        Returns:
+            list: La liste finale des fichiers, triée.
         """
-        if key is None : return files
-        return [f for f in files if Path(f).stem.endswith(key)]
+        # 1. On récupère la liste de fichiers bruts
+        files_in_folder = self.getFilesInFolder(extension_filter)
+        
+        if not files_in_folder:
+            return []
+
+        # 2. On la filtre par clef de fréquence (si une clef est fournie)
+        filtered_list = files_in_folder
+        if freq_key is not None:
+            filtered_list = [f for f in files_in_folder if f.stem.endswith(freq_key)]
+        
+        if not filtered_list:
+            return []
+            
+        # 3. On trie la liste filtrée numériquement
+        filtered_list.sort(key=lambda f: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', f.stem)])
+        
+        return filtered_list
 
     
     def setSelectedFile(self, GPR_File:Path, radar : Radar, index_in_list: int = 0):
@@ -1725,6 +1811,11 @@ class Graphique():
             self.ax.grid(True, axis='y', color='black', linestyle='-.', linewidth=0.5)
 
         # --- FIN DE LA CORRECTION ---
+
+        try: #Optimisation de l'espace
+            self.fig.tight_layout(rect=[0, 0.05, 1, 1])
+        except Exception as e:
+            print(f"Avertissement : tight_layout a échoué. {e}")
 
         self.ax.figure.canvas.draw()
 
