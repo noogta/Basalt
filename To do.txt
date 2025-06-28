@@ -1,18 +1,23 @@
+EN COURS 
+    Kirchoff : J'ai que des zérooooo 
+    Scope (A-Scan) -- Faire un curseur
+    Pointeur amplitude
 
 IMPORTANT
-    Kirchoff 
+    Déconvolution
+    Afficher %valeur
 
 A VOIR
-    Déconvolution
     Arrière plan export
     Trace mean : trait blanc ou noir
     Interpolation
     Découpage fichier flex
-    Passer en web ?
-    3D
     Export par tranche
-    Scope
-    Afficher %valeur
+
+DANS LONGTEMPS
+    Dessiner des points, interfaces et rectangles
+    3D
+    Passer en web ?
 
 FAIT
     Inversement trace
@@ -20,3 +25,4 @@ FAIT
     Réduir la taille du blanc export
     Echelle
     Revenir dans le dernier dossier
+    Scope (A-Scan)

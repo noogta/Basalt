@@ -2,6 +2,7 @@ import numpy as np
 import os
 import readgssi.readgssi as dzt
 import re
+import numba
 
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -15,7 +16,7 @@ from scipy.ndimage import uniform_filter1d
 
 import sys
 from PyQt6.QtCore import Qt, QSettings
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter
+from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton
 from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtGui import QDoubleValidator, QValidator
@@ -28,6 +29,16 @@ APPLICATION_NAME = "BasaltGPR"
 cste_global = {
     "c_lum": 299792458, # Vitesse de la lumière dans le vide en m/s
     }
+
+@numba.jit(nopython=True, cache=True)
+def _kirchhoff_migration_loop(data, migrated_data, nt, nx, dt, dx, v, aperture_traces):
+    """
+    La boucle de migration principale, optimisée par Numba.
+    """
+    # ... (toute la logique de la boucle avec les for i_x, for i_t, etc.)
+    # ...
+    return migrated_data
+
 class Radar(Enum):
     MALA = 0
     GSSI_XT = 1
@@ -166,9 +177,13 @@ class MainWindow():
         self.ax = self.fig.add_subplot(111)
         self.radargramme = Graphique(self.ax, self.fig)
 
+        # A-Scan
         self.trace_fig = Figure(figsize=(2, 10), dpi=100)
+        # On applique tight_layout à cette figure pour optimiser l'espace
+        self.trace_fig.tight_layout() 
         self.trace_canvas = FigureCanvas(self.trace_fig)
         self.trace_ax = self.trace_fig.add_subplot(111)
+        # On crée un objet Graphique dédié pour lui
         self.trace_plot = Graphique(self.trace_ax, self.trace_fig)
 
         # 3. On ajoute directement les canevas au splitter
@@ -183,8 +198,9 @@ class MainWindow():
         # 5. On assemble la fenêtre principale
         self.main_layout.addWidget(self.control_panel_widget) # Bloc de gauche
         self.main_layout.addWidget(self.splitter)            # Bloc de droite (maintenant le splitter)
-        self.window.closeEvent = self.closeEvent
 
+        self.window.closeEvent = self.closeEvent
+        self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
 
     def closeEvent(self, event):
         """
@@ -363,6 +379,7 @@ class MainWindow():
         self.line_edit_x0.setValidator(self.float_validator)
         self.xlim_layout.addWidget(self.line_edit_x0)
         self.line_edit_x0.editingFinished.connect(self.on_x0_edited)
+        self.line_edit_x0.returnPressed.connect(self.on_x0_edited)
 
         self.label_xlim = QLabel("X_lim:")
         self.xlim_layout.addWidget(self.label_xlim)
@@ -371,6 +388,7 @@ class MainWindow():
         self.line_edit_xlim.setValidator(self.float_validator)
         self.xlim_layout.addWidget(self.line_edit_xlim)
         self.line_edit_xlim.editingFinished.connect(self.on_xlim_edited)
+        self.line_edit_xlim.returnPressed.connect(self.on_xlim_edited)
 
         # Layout horizontal pour les limites de l'axe Y
         self.ylim_layout = QHBoxLayout()
@@ -384,6 +402,7 @@ class MainWindow():
         self.line_edit_y0.setValidator(self.float_validator)
         self.ylim_layout.addWidget(self.line_edit_y0)
         self.line_edit_y0.editingFinished.connect(self.on_y0_edited)
+        self.line_edit_y0.returnPressed.connect(self.on_y0_edited)
 
         self.label_ylim = QLabel("Y_lim:")
         self.ylim_layout.addWidget(self.label_ylim)
@@ -430,11 +449,6 @@ class MainWindow():
         # On ajoute ce cadre au layout principal du panneau de contrôle
         self.control_layout.addWidget(coord_frame)
         #----------------------------
-
-        # Ajoutez d'autres pages ici si nécessaire (ex: Filtrage, Affichage, etc.)
-        # self.other_page = QWidget()
-        # self.tab_widget.addTab(self.other_page, "Autre Page")
-
         # Ajoutez un espaceur pour pousser les éléments vers le haut si nécessaire
         self.control_layout.addStretch()
 
@@ -483,7 +497,6 @@ class MainWindow():
         self.basalt.traitementScan()
         # 2. Appeler la fonction de redessin pour afficher le résultat
         self.redraw_plot()
-        
         
     def create_gain_page(self):
         """Crée et retourne la page des paramètres de gain."""
@@ -663,6 +676,18 @@ class MainWindow():
 
         filter_layout.addStretch() # Pousse les éléments vers le haut
 
+        migration_groupbox = QGroupBox("Migration")
+        migration_layout = QVBoxLayout(migration_groupbox)
+        
+        self.btn_apply_migration = QPushButton("Appliquer la Migration Kirchhoff")
+        self.btn_apply_migration.setToolTip("Attention : traitement lourd. Refocalise les hyperboles.")
+        migration_layout.addWidget(self.btn_apply_migration)
+        
+        filter_layout.addWidget(migration_groupbox)
+
+        # Connexion du signal
+        self.btn_apply_migration.clicked.connect(self.on_migration_clicked)
+
         return filter_widget
 
     def create_info_page(self):
@@ -817,29 +842,43 @@ class MainWindow():
             self.on_ylim_edited() # Cet appel déclenche le update_display final
         else:
             print("Erreur : Impossible de retrouver le fichier correspondant à l'élément cliqué.")
-            
+                
     def on_mouse_move(self, event):
         """
-        Gère les événements de mouvement de la souris sur le canvas Matplotlib.
+        Gère le mouvement de la souris sur le radargramme, met à jour les
+        coordonnées et le graphique de la trace (A-Scan).
         """
-        # L'événement contient les coordonnées en pixels (event.x, event.y)
-        # et en données (event.xdata, event.ydata)
-
-        # D'abord, on vérifie si la souris est bien à l'intérieur de nos axes de graphique
-        if event.inaxes is self.ax:
-            # event.xdata et event.ydata nous donnent directement les coordonnées
-            # dans le système de l'axe (mètres, ns, samples, etc.)
-            x_coord = event.xdata
-            y_coord = event.ydata
-
-            # On formate le texte pour l'affichage avec 2 décimales
-            coord_text = f"X: {x_coord:.2f} | Y: {y_coord:.2f}"
-            
-            # On met à jour le texte de notre label
-            self.coord_label.setText(coord_text)
-        else:
-            # Si la souris sort des axes, on efface les coordonnées
+        if event.inaxes is not self.ax or self.basalt.traitement is None:
             self.coord_label.setText("X: -- | Y: --")
+            return
+
+        x_coord, y_coord = event.xdata, event.ydata
+        self.coord_label.setText(f"X: {x_coord:.2f} | Y: {y_coord:.2f}")
+
+        # 1. On récupère les paramètres d'affichage.
+        plot_extent, xlabel, ylabel = self.basalt.get_plot_axes_parameters()
+        if plot_extent is None: return
+
+        # --- CORRECTION : Utiliser 'plot_extent' partout au lieu de 'extent' ---
+        x_axis_start, x_axis_end = plot_extent[0], plot_extent[1]
+        num_traces_in_view = self.basalt.traitement.data.shape[1]
+
+        x_range = x_axis_end - x_axis_start
+        trace_range = num_traces_in_view
+        
+        if x_range > 0:
+            relative_pos = (x_coord - x_axis_start) / x_range
+            trace_idx = int(relative_pos * (trace_range - 1))
+            trace_idx = max(0, min(trace_idx, trace_range - 1))
+            
+            trace_data = self.basalt.traitement.data[:, trace_idx]
+            
+            y_axis_start = plot_extent[3]
+            y_axis_end = plot_extent[2]
+            y_values = np.linspace(y_axis_start, y_axis_end, num=len(trace_data))
+            
+            self.trace_plot.plot_trace(trace_data, y_values, xlabel="Amplitude", ylabel=ylabel)
+    
     def on_contrast_slider_changed(self, value):
         """Gère le changement de valeur du slider de contraste."""
         real_contrast_value = value / 100.0
@@ -957,7 +996,20 @@ class MainWindow():
         
         # On relance un traitement complet pour appliquer/retirer le filtre
         self.update_display()
-        
+
+    def on_migration_clicked(self):
+        """Lance le processus de migration."""
+        if self.basalt.data is None:
+            print("Veuillez charger un fichier avant de lancer la migration.")
+            return
+            
+        print("Lancement de la migration depuis l'interface...")
+        # On délègue le travail à une nouvelle méthode dans Basalt
+        self.basalt.run_migration()
+        # Une fois la migration terminée, on met à jour l'affichage
+        print("Mise à jour de l'affichage avec les données migrées...")
+        self.redraw_plot() 
+
     def on_g_edited(self):
         self.basalt.traitementValues.g = self._parse_input_to_float(self.line_edit_g.text(), default_on_error=1.0)
         self.update_display()
@@ -1379,6 +1431,29 @@ class Basalt():
         
         return plot_extent, xlabel, ylabel
 
+    def run_migration(self):
+        """Prépare les paramètres et lance la migration de Kirchhoff."""
+        if self.traitement is None or self.data is None:
+            return
+
+        # 1. Collecter les "ingrédients"
+        header = self.data.header
+        
+        # Vitesse de propagation
+        v = cste_global["c_lum"] / sqrt(self.traitementValues.epsilon)
+        
+        # Pas de temps (dt) en secondes
+        dt_s = (header.value_time * 1e-9) / header.value_sample if header.value_sample else 0
+        
+        # Pas de distance (dx) en mètres
+        dx_m = header.value_dist_total / header.value_trace if header.value_trace else 0
+        
+        # Ouverture de migration (en mètres) - une valeur de 2 à 3 mètres est un bon début
+        aperture_m = 2.0 
+
+        # 2. Appeler la fonction de traitement
+        self.traitement.apply_kirchhoff_migration(dx=dx_m, dt=dt_s, v=v, aperture_m=aperture_m)
+        
     @property
     def getExportName(self):
         return self.folder + "/" + self.selectedFile.stem + ".png"
@@ -1754,6 +1829,37 @@ class Traitement():
         # ::-1 -> prend toutes les colonnes (les traces) mais avec un pas de -1,
         # ce qui inverse leur ordre.
         self.data = self.data[:, ::-1]
+    
+    def apply_kirchhoff_migration(self, dx: float, dt: float, v: float, aperture_m: float):
+        """
+        Applique la migration de Kirchhoff aux données.
+        """
+        print("Début de la migration de Kirchhoff...")
+        nt, nx = self.data.shape # nt = nombre de samples, nx = nombre de traces
+
+        # Vérifications des paramètres
+        if nt == 0 or dx == 0 or dt == 0 or v == 0:
+            print("Erreur : Paramètres de migration invalides (dx, dt, v ne peuvent pas être nuls).")
+            return
+            
+        # Convertir l'ouverture de mètres en nombre de traces
+        aperture_traces = int(aperture_m / dx)
+
+        # Créer un tableau vide pour recevoir les données migrées
+        migrated_data = np.zeros_like(self.data, dtype=np.float64)
+        data_float = self.data.astype(np.float64)
+
+        # --- LIGNE DE CODE CORRIGÉE ---
+        # L'appel à la fonction _kirchhoff_migration_loop doit être une
+        # assignation de variable complète comme ceci :
+        migrated_data = _kirchhoff_migration_loop(
+            data_float, migrated_data, nt, nx, dt, dx, v, aperture_traces
+        )
+        # --- FIN DE LA CORRECTION ---
+        print(f"APRÈS migration: min={np.min(migrated_data):.2f}, max={np.max(migrated_data):.2f}")
+        self.data = migrated_data.astype(self.data.dtype)
+        print("Migration terminée.")
+
 
 class Graphique():
     def __init__(self, ax : plt.Axes, fig : Figure):
@@ -1797,7 +1903,7 @@ class Graphique():
         self.ax.locator_params(axis='x', nbins=x_ticks)
         self.ax.locator_params(axis='y', nbins=y_ticks)
 
-    # --- GESTION DE LA GRILLE (Version Définitive) ---
+        # --- GESTION DE LA GRILLE (Version Définitive) ---
 
         # 1. On efface TOUTES les grilles précédentes pour repartir de zéro.
         self.ax.grid(False)
@@ -1818,6 +1924,38 @@ class Graphique():
             print(f"Avertissement : tight_layout a échoué. {e}")
 
         self.ax.figure.canvas.draw()
+
+    def plot_trace(self, trace_data, y_values, xlabel: str, ylabel: str):
+        """
+        Efface et redessine le graphique pour afficher une seule trace (courbe 1D).
+        """
+        # 1. On efface complètement les anciens tracés pour éviter les superpositions
+        self.ax.cla()
+
+        # 2. On trace les données : amplitude en X, profondeur/temps/sample en Y
+        self.ax.plot(trace_data, y_values, color='blue', linewidth=0.8)
+        
+        # 3. On configure les axes
+        self.ax.set_xlabel(xlabel)
+        self.ax.xaxis.set_label_position('top')
+        self.ax.xaxis.set_ticks_position('top')
+        
+        # 4. On inverse l'axe Y pour qu'il corresponde au radargramme (0 en haut)
+        self.ax.invert_yaxis()
+        
+        vmin, vmax = self.getRangePlot()
+        #self.ax.set_xlim(vmin, vmax)
+
+        # On active une grille pour mieux lire les valeurs
+        self.ax.grid(True, linestyle='--', linewidth=0.5)
+        
+        try: #Optimisation de l'espace
+            self.fig.tight_layout(rect=[0, 0.05, 1, 1])
+        except Exception as e:
+            print(f"Avertissement : tight_layout a échoué. {e}")
+            
+        self.fig.canvas.draw()
+
 
     def getRangePlot(self):
         """
