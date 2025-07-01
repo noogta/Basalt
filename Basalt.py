@@ -13,6 +13,7 @@ from pathlib import Path
 from scipy import signal
 from math import sqrt, floor
 from scipy.ndimage import uniform_filter1d
+from scipy.stats import trim_mean
 
 import sys
 from PyQt6.QtCore import Qt, QSettings
@@ -31,12 +32,49 @@ cste_global = {
     }
 
 @numba.jit(nopython=True, cache=True)
-def _kirchhoff_migration_loop(data, migrated_data, nt, nx, dt, dx, v, aperture_traces):
+def _kirchhoff_migration_loop(data, migrated_data, nt, nx, dt, dx, v, aperture_traces, y_offset):
     """
     La boucle de migration principale, optimisée par Numba.
     """
-    # ... (toute la logique de la boucle avec les for i_x, for i_t, etc.)
-    # ...
+    # Boucle sur chaque pixel de l'image de SORTIE (l'image migrée)
+    for i_x in range(nx):  # Pour chaque trace de sortie
+        # On peut ignorer le premier échantillon de sortie s'il est à t=0
+        for i_t in range(1, nt):  # Pour chaque échantillon de temps/profondeur
+            
+            # Temps (two-way) du point de sortie
+            t0 = i_t * dt
+            # Position x du point de sortie
+            x = i_x * dx
+            
+            # Profondeur z du point de sortie
+            z = v * t0 / 2.0
+            
+            sum_val = 0.0
+            
+            # On définit une "ouverture" pour limiter le calcul
+            start_trace = max(0, i_x - aperture_traces)
+            end_trace = min(nx, i_x + aperture_traces)
+
+            # Boucle sur les traces de l'image d'ENTRÉE (le radargramme) dans l'ouverture
+            for j_x in range(start_trace, end_trace):
+                xj = j_x * dx
+                
+                # Calcul du temps de parcours (équation de l'hyperbole de diffraction)
+                dist = np.sqrt((xj - x)**2 + z**2)
+                t_hyperbole = (2.0 * dist) / v
+                
+                # On convertit ce temps en indice de sample ABSOLU
+                i_t_in_absolu = int(round(t_hyperbole / dt))
+                
+                # On traduit l'indice absolu en indice LOCAL pour notre tableau découpé
+                i_t_local = i_t_in_absolu - y_offset
+                
+                # On vérifie que cet indice LOCAL est valide dans notre tableau découpé
+                if 0 <= i_t_local < nt:
+                    sum_val += data[i_t_local, j_x]
+
+            migrated_data[i_t, i_x] = sum_val
+
     return migrated_data
 
 class Radar(Enum):
@@ -58,7 +96,9 @@ class TraitementValues:
     is_sub_mean: bool = False
     sub_mean_mode: str = 'Globale' # 'Globale' ou 'Mobile'
     sub_mean_window: int = 21
+    sub_mean_trim_percent: float = 5.0 # Pourcentage à retirer de chaque côté (5% par défaut)
 
+    
     is_filtre_freq : bool = False
     antenna_freq : float = 0 
     sampling_freq : float = 0
@@ -76,13 +116,13 @@ class TraitementValues:
     show_y_ticks: bool = False
 
     epsilon :float = 8.0
-    contraste :float= 1.0
+    contraste :float= 0.5
 
     unit_x: str = "Distance (m)"
     unit_y: str = "Profondeur (m)"
 
     profile_direction_mode: str = 'normal' # Options: 'normal', 'mirror_all', 'mirror_serpentine'
-    
+    interpolation_mode: str = 'nearest'
  
 class Const():
     def __init__(self):
@@ -96,7 +136,6 @@ class Const():
         self.xLabel = ["m", "s", "mesures"]
         self.yLabel = ["m", "ns", "samples"]
 
-
     def getRadarByExtension(self, ext:str):
         match ext:
             case ".rd7"  | ".rd3":
@@ -105,17 +144,16 @@ class Const():
                 return Radar.GSSI_XT
             case ".dzt":
                 return Radar.GSSI_FLEX
-    def getFiltreFreq(self, freq:str):
+    def getFiltreFreq(self, freq: str):
         match freq:
-            case "Filtrage désactivé":
-                return None
             case "Haute Fréquence":
                 return "_1"
             case "Basse Fréquence":
                 return '_2'
+            # Pour "Filtrage désactivé", "Canal 1", "Canal 2", etc., on ne filtre pas par nom de fichier.
             case _:
                 return None
-            
+                
     def getFiltreExtension(self,ext:str):
         return "*" + ext
 
@@ -178,7 +216,7 @@ class MainWindow():
         self.radargramme = Graphique(self.ax, self.fig)
 
         # A-Scan
-        self.trace_fig = Figure(figsize=(2, 10), dpi=100)
+        self.trace_fig = Figure(figsize=(4, 10), dpi=100)
         # On applique tight_layout à cette figure pour optimiser l'espace
         self.trace_fig.tight_layout() 
         self.trace_canvas = FigureCanvas(self.trace_fig)
@@ -265,19 +303,20 @@ class MainWindow():
 
         # Crée un layout horizontal pour la deuxième paire (Fréquence)
         frequence_layout = QHBoxLayout()
-        label_frequence = QLabel("Filtre fréquence :")
+        self.label_frequence = QLabel("Filtre fréquence :") 
+        
         self.combo_box_frequence = QComboBox()
         self.combo_box_frequence.addItems(self.constante.freq_state)
-        # Ajoute le label et la combobox à LEUR propre layout horizontal
-        frequence_layout.addWidget(label_frequence)
+        
+        # On utilise la nouvelle variable
+        frequence_layout.addWidget(self.label_frequence)
         frequence_layout.addWidget(self.combo_box_frequence)
-        # Ajoute ce deuxième layout de paire au panneau de contrôle vertical
         self.control_layout.addLayout(frequence_layout)
 
 
         # On connecte les signaux après avoir créé les objets
-        self.combo_box_extension.currentIndexChanged.connect(self.populate_listFile_widget)
-        self.combo_box_frequence.currentIndexChanged.connect(self.populate_listFile_widget)
+        self.combo_box_extension.currentTextChanged.connect(self.on_extension_changed)
+        self.combo_box_frequence.currentTextChanged.connect(self.on_secondary_filter_changed)
         # ----- 
 
         ## Réglage du Contraste
@@ -294,7 +333,7 @@ class MainWindow():
         self.slider_contrast = QSlider(Qt.Orientation.Horizontal)
         self.slider_contrast.setMinimum(1)    # Correspond à 0.01 (0.01 * 100)
         self.slider_contrast.setMaximum(100)  # Correspond à 1.00 (1.00 * 100)
-        self.slider_contrast.setValue(100)     # Valeur initiale, correspond à 0.50
+        self.slider_contrast.setValue(50)     # Valeur initiale, correspond à 0.50
         self.slider_contrast.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider_contrast.setTickInterval(10) # Affiche des marques tous les 0.1 (10 unités)
         self.contrast_layout.addWidget(self.slider_contrast)
@@ -401,8 +440,15 @@ class MainWindow():
         self.line_edit_y0.setText("0.0")
         self.line_edit_y0.setValidator(self.float_validator)
         self.ylim_layout.addWidget(self.line_edit_y0)
+
+        self.btn_auto_t0 = QPushButton("Auto")
+        self.btn_auto_t0.setToolTip("Détecter automatiquement la première arrivée (T0)")
+        self.ylim_layout.addWidget(self.btn_auto_t0)
+
+
         self.line_edit_y0.editingFinished.connect(self.on_y0_edited)
         self.line_edit_y0.returnPressed.connect(self.on_y0_edited)
+        self.btn_auto_t0.clicked.connect(self.on_auto_t0_clicked)
 
         self.label_ylim = QLabel("Y_lim:")
         self.ylim_layout.addWidget(self.label_ylim)
@@ -480,7 +526,8 @@ class MainWindow():
                             xlabel=xlabel,
                             ylabel=ylabel,
                             show_x_ticks=self.basalt.traitementValues.show_x_ticks,
-                            show_y_ticks=self.basalt.traitementValues.show_y_ticks)
+                            show_y_ticks=self.basalt.traitementValues.show_y_ticks,
+                            interpolation_mode=self.basalt.traitementValues.interpolation_mode)
                             
         self.canvas.draw()
 
@@ -606,43 +653,57 @@ class MainWindow():
         dewow_layout.addStretch() # Pousse le checkbox à gauche
         filter_layout.addLayout(dewow_layout)
 
-        # --- NOUVEAU BLOC À AJOUTER (dans create_filter_page) ---
+        # --- Retrait de la Trace Moyenne ---
         label_submean = QLabel("--- Retrait de la Trace Moyenne ---")
         label_submean.setStyleSheet("font-weight: bold; margin-top: 10px;")
         filter_layout.addWidget(label_submean)
 
-        # 1. Checkbox pour activer/désactiver la fonction
         self.checkbox_sub_mean = QCheckBox("Activer le retrait de trace moyenne")
-        self.checkbox_sub_mean.setChecked(False) # Désactivé par défaut
         filter_layout.addWidget(self.checkbox_sub_mean)
 
-        # Layout pour les options
+        # Layout pour les options qui vont changer dynamiquement
         sub_mean_options_layout = QHBoxLayout()
+        # Widget pour les options du mode "Mobile"
+        self.mobile_options_widget = QWidget()
+        mobile_layout = QHBoxLayout(self.mobile_options_widget)
+        mobile_layout.setContentsMargins(0,0,0,0)
+        mobile_layout.addWidget(QLabel("Fenêtre :"))
+        self.line_edit_sub_mean_window = QLineEdit(str(self.basalt.traitementValues.sub_mean_window))
+        self.line_edit_sub_mean_window.setValidator(QDoubleValidator(1, 1001, 0))
+        mobile_layout.addWidget(self.line_edit_sub_mean_window)
 
-        # 2. ComboBox pour choisir le mode
+        # Widget pour les options du mode "Globale"
+        self.globale_options_widget = QWidget()
+        globale_layout = QHBoxLayout(self.globale_options_widget)
+        globale_layout.setContentsMargins(0,0,0,0)
+        globale_layout.addWidget(QLabel("Élagage (%) :"))
+        self.line_edit_trim_percent = QLineEdit(str(self.basalt.traitementValues.sub_mean_trim_percent))
+        self.line_edit_trim_percent.setValidator(QDoubleValidator(0, 49, 1)) # De 0% à 49%
+        globale_layout.addWidget(self.line_edit_trim_percent)
+
+        # On ajoute le choix du mode et les deux widgets d'options au layout
+        sub_mean_options_layout.addWidget(QLabel("Mode :"))
         self.combo_sub_mean_mode = QComboBox()
         self.combo_sub_mean_mode.addItems(["Globale", "Mobile"])
-        sub_mean_options_layout.addWidget(QLabel("Mode :"))
         sub_mean_options_layout.addWidget(self.combo_sub_mean_mode)
-
-        # 3. LineEdit pour la taille de la fenêtre (pour le mode Mobile)
-        self.line_edit_sub_mean_window = QLineEdit()
-        self.line_edit_sub_mean_window.setPlaceholderText("Taille fenêtre")
-        self.line_edit_sub_mean_window.setText("21") # Une valeur impaire est souvent utilisée
-        self.line_edit_sub_mean_window.setValidator(QDoubleValidator(1, 1001, 0)) # Validateur d'entiers
-        sub_mean_options_layout.addWidget(QLabel("Fenêtre :"))
-        sub_mean_options_layout.addWidget(self.line_edit_sub_mean_window)
+        sub_mean_options_layout.addWidget(self.globale_options_widget)
+        sub_mean_options_layout.addWidget(self.mobile_options_widget)
+        sub_mean_options_layout.addStretch()
 
         filter_layout.addLayout(sub_mean_options_layout)
-        
-        # On désactive les options au départ
-        self.combo_sub_mean_mode.setEnabled(False)
-        self.line_edit_sub_mean_window.setEnabled(False)
 
-        # Connexion des signaux aux nouvelles fonctions de rappel
+        # On initialise la visibilité et l'état "activé"
+        self.checkbox_sub_mean.setChecked(False)
+        self.combo_sub_mean_mode.setEnabled(False)
+        self.globale_options_widget.setEnabled(False)
+        self.mobile_options_widget.setEnabled(False)
+        self.mobile_options_widget.setVisible(False) # Caché au départ car "Globale" est sélectionné
+
+        # Connexion des signaux
         self.checkbox_sub_mean.stateChanged.connect(self.on_sub_mean_toggled)
         self.combo_sub_mean_mode.currentIndexChanged.connect(self.on_sub_mean_mode_changed)
         self.line_edit_sub_mean_window.editingFinished.connect(self.on_sub_mean_window_edited)
+        self.line_edit_trim_percent.editingFinished.connect(self.on_trim_percent_edited) # <-- Nouvelle connexion
 
         # Filtre Fréquentiel (Passe-Haut / Passe-Bas)
         label_freq_filter = QLabel("--- Filtre fréquentiel ---")
@@ -676,14 +737,17 @@ class MainWindow():
 
         filter_layout.addStretch() # Pousse les éléments vers le haut
 
-        migration_groupbox = QGroupBox("Migration")
-        migration_layout = QVBoxLayout(migration_groupbox)
+        filter_layout.addSpacing(20)
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        filter_layout.addWidget(line)
         
+        # Le bouton est maintenant ajouté directement au layout de la page
         self.btn_apply_migration = QPushButton("Appliquer la Migration Kirchhoff")
         self.btn_apply_migration.setToolTip("Attention : traitement lourd. Refocalise les hyperboles.")
-        migration_layout.addWidget(self.btn_apply_migration)
-        
-        filter_layout.addWidget(migration_groupbox)
+        self.btn_apply_migration.clicked.connect(self.on_migration_clicked)
+        filter_layout.addWidget(self.btn_apply_migration)
 
         # Connexion du signal
         self.btn_apply_migration.clicked.connect(self.on_migration_clicked)
@@ -749,27 +813,43 @@ class MainWindow():
         self.line_edit_y_ticks.editingFinished.connect(self.on_y_ticks_edited)
         self.line_edit_y_ticks.returnPressed.connect(self.on_y_ticks_edited)
         
+        label_direction = QLabel("--- Sens du Profil ---")
+        label_direction.setStyleSheet("font-weight: bold; margin-top: 20px;")
+        options_layout.addWidget(label_direction)
 
-        direction_groupbox = QGroupBox("Sens du Profil")
-        direction_layout = QVBoxLayout(direction_groupbox)
-
+        # On crée les boutons radio 
         self.radio_direction_normal = QRadioButton("Normal (par défaut)")
         self.radio_direction_normal.setChecked(True)
         self.radio_direction_mirror_all = QRadioButton("Inverser tous les profils (Miroir)")
         self.radio_direction_serpentine = QRadioButton("Inverser un profil sur deux (Serpentin)")
         
-        # On connecte le signal 'toggled' de CHAQUE bouton à la MÊME fonction
+        # On les ajoute DIRECTEMENT au layout principal de l'onglet
+        options_layout.addWidget(self.radio_direction_normal)
+        options_layout.addWidget(self.radio_direction_mirror_all)
+        options_layout.addWidget(self.radio_direction_serpentine)
         self.radio_direction_normal.toggled.connect(self.on_direction_mode_changed)
         self.radio_direction_mirror_all.toggled.connect(self.on_direction_mode_changed)
         self.radio_direction_serpentine.toggled.connect(self.on_direction_mode_changed)
 
-        direction_layout.addWidget(self.radio_direction_normal)
-        direction_layout.addWidget(self.radio_direction_mirror_all)
-        direction_layout.addWidget(self.radio_direction_serpentine)
-        options_layout.addWidget(direction_groupbox)
-
         options_layout.addStretch() # Pousse tout vers le haut
+
+
+        # --- Section pour la Qualité d'Affichage ---
+        label_interpolation = QLabel("--- Qualité d'Affichage (Interpolation) ---")
+        label_interpolation.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        options_layout.addWidget(label_interpolation)
+
+        interpolation_layout = QHBoxLayout()
+        interpolation_layout.addWidget(QLabel("Méthode :"))
+        self.combo_interpolation = QComboBox()
+        interpolation_options = ['nearest', 'bilinear', 'bicubic', 'lanczos', 'spline16']
+        self.combo_interpolation.addItems(interpolation_options)
+        interpolation_layout.addWidget(self.combo_interpolation)
+        options_layout.addLayout(interpolation_layout)
+        # -----------------
+
         return options_widget
+
 
     def populate_listFile_widget(self):
         """Remplit le QListWidget avec les noms de fichiers, triés numériquement."""
@@ -785,6 +865,58 @@ class MainWindow():
             list_item = QListWidgetItem(file.stem)
             self.listFile_widget.addItem(list_item)
     
+
+    def on_extension_changed(self, extension_text: str):
+        """
+        Appelée quand l'extension change. Met à jour les options de la 2ème ComboBox.
+        """
+        # On bloque les signaux de la 2ème box pour éviter qu'elle ne se déclenche pendant qu'on la modifie
+        self.combo_box_frequence.blockSignals(True)
+        
+        # On la vide de ses anciennes options
+        self.combo_box_frequence.clear()
+
+        # Si l'utilisateur a choisi un fichier GSSI Flex (.dzt)
+        if extension_text == ".dzt":
+            # --- MODIFICATION ICI ---
+            # AVANT : self.label_combo_2.setText("Canal :")
+            # APRÈS :
+            self.label_frequence.setText("Canal :")
+            self.combo_box_frequence.addItems(["Canal 1", "Canal 2"])
+        # Pour tous les autres types de fichiers
+        else:
+            # --- MODIFICATION ICI ---
+            # AVANT : self.label_combo_2.setText("Filtre fréquence :")
+            # APRÈS :
+            self.label_frequence.setText("Filtre fréquence :")
+            self.combo_box_frequence.addItems(self.constante.freq_state)
+
+        # On réactive les signaux
+        self.combo_box_frequence.blockSignals(False)
+        
+        # On rafraîchit la liste des fichiers maintenant que les options de filtre sont à jour
+        self.populate_listFile_widget()
+
+    def on_secondary_filter_changed(self, selected_text: str):
+        """
+        Gère le changement de la 2ème ComboBox (qui peut être un filtre ou un sélecteur de canal).
+        """
+        extension = self.combo_box_extension.currentText()
+
+        # Si on est en mode GSSI Flex
+        if extension == '.dzt':
+            # On met à jour la variable qui contrôle le canal à afficher
+            self.basalt.boolFlex = (selected_text == "Canal 1")
+            print(f"Changement de canal GSSI Flex. Affichage du canal {'1' if self.basalt.boolFlex else '2'}.")
+            
+            # Si un fichier est déjà chargé, on le retraite pour afficher le nouveau canal
+            if self.basalt.data:
+                self.update_display()
+        # Sinon, on est en mode MALA
+        else:
+            # L'action est de rafraîchir la liste des fichiers avec le filtre _1 ou _2
+            self.populate_listFile_widget()
+        
     def _parse_input_to_float(self, text: str, default_on_error: float = 0.0, return_none_if_empty: bool = False) -> Union[float, None]:
         """
         Convertit un texte en float, en gérant la virgule et les erreurs.
@@ -842,43 +974,68 @@ class MainWindow():
             self.on_ylim_edited() # Cet appel déclenche le update_display final
         else:
             print("Erreur : Impossible de retrouver le fichier correspondant à l'élément cliqué.")
-                
+
     def on_mouse_move(self, event):
         """
-        Gère le mouvement de la souris sur le radargramme, met à jour les
-        coordonnées et le graphique de la trace (A-Scan).
+        Gère les événements de mouvement de la souris, met à jour les coordonnées (X, Y)
+        et l'amplitude (A), ainsi que le graphique de la trace.
         """
-        if event.inaxes is not self.ax or self.basalt.traitement is None:
-            self.coord_label.setText("X: -- | Y: --")
+        # Si aucun fichier n'est chargé ou si la souris est en dehors des axes du radargramme
+        if event.inaxes is not self.ax or self.basalt.traitement is None or self.basalt.traitement.data.size == 0:
+            self.coord_label.setText("X: -- | Y: -- | A: --")
             return
 
+        # 1. Récupération des coordonnées X et Y de la souris (inchangé)
         x_coord, y_coord = event.xdata, event.ydata
-        self.coord_label.setText(f"X: {x_coord:.2f} | Y: {y_coord:.2f}")
-
-        # 1. On récupère les paramètres d'affichage.
+        
+        # 2. Conversion des coordonnées en indices de tableau [ligne, colonne]
+        data = self.basalt.traitement.data
+        num_samples, num_traces = data.shape
+        
         plot_extent, xlabel, ylabel = self.basalt.get_plot_axes_parameters()
         if plot_extent is None: return
 
-        # --- CORRECTION : Utiliser 'plot_extent' partout au lieu de 'extent' ---
         x_axis_start, x_axis_end = plot_extent[0], plot_extent[1]
-        num_traces_in_view = self.basalt.traitement.data.shape[1]
+        y_axis_top, y_axis_bottom = plot_extent[3], plot_extent[2] # Inversé: top=min, bottom=max
 
+        # Calcul de l'indice de la trace (colonne)
+        trace_idx = 0
         x_range = x_axis_end - x_axis_start
-        trace_range = num_traces_in_view
-        
         if x_range > 0:
-            relative_pos = (x_coord - x_axis_start) / x_range
-            trace_idx = int(relative_pos * (trace_range - 1))
-            trace_idx = max(0, min(trace_idx, trace_range - 1))
-            
-            trace_data = self.basalt.traitement.data[:, trace_idx]
-            
-            y_axis_start = plot_extent[3]
-            y_axis_end = plot_extent[2]
-            y_values = np.linspace(y_axis_start, y_axis_end, num=len(trace_data))
-            
-            self.trace_plot.plot_trace(trace_data, y_values, xlabel="Amplitude", ylabel=ylabel)
-    
+            relative_pos_x = (x_coord - x_axis_start) / x_range
+            trace_idx = int(relative_pos_x * (num_traces - 1))
+
+        # Calcul de l'indice du sample (ligne)
+        sample_idx = 0
+        y_range = y_axis_bottom - y_axis_top
+        if y_range > 0:
+            relative_pos_y = (y_coord - y_axis_top) / y_range
+            sample_idx = int(relative_pos_y * (num_samples - 1))
+
+        # Sécurité pour les bords de l'image
+        trace_idx = max(0, min(trace_idx, num_traces - 1))
+        sample_idx = max(0, min(sample_idx, num_samples - 1))
+
+        # 3. Récupération de l'amplitude à ces indices
+        amplitude = data[sample_idx, trace_idx]
+
+        # 4. Mise à jour du label avec la nouvelle information d'amplitude (A)
+        coord_text = f"X: {x_coord:.2f} | Y: {y_coord:.2f} | A: {amplitude}"
+        self.coord_label.setText(coord_text)
+        
+        # La mise à jour de l'A-Scan (graphique de droite) reste fonctionnelle
+        trace_data = data[:, trace_idx]
+        y_values = np.linspace(y_axis_top, y_axis_bottom, num=num_samples)
+        
+        self.trace_plot.plot_trace(
+                    trace_data, 
+                    y_values, 
+                    xlabel="Amplitude", 
+                    ylabel=ylabel, 
+                    y_cursor_pos=y_coord,
+                    x_cursor_pos=amplitude  # <-- On ajoute la position en amplitude
+                )
+
     def on_contrast_slider_changed(self, value):
         """Gère le changement de valeur du slider de contraste."""
         real_contrast_value = value / 100.0
@@ -925,6 +1082,25 @@ class MainWindow():
         self.basalt.traitementValues.T0 = self._parse_input_to_float(self.line_edit_y0.text())
         self.update_display()
 
+    def on_auto_t0_clicked(self):
+        """
+        Lance la détection automatique de T0 et met à jour l'interface.
+        """
+        if self.basalt.data is None:
+            print("Veuillez d'abord charger un fichier.")
+            return
+
+        # 1. On appelle la méthode de détection de la classe Basalt
+        detected_t0 = self.basalt.detect_t0()
+        
+        # 2. On met à jour le champ de texte Y0 avec la valeur trouvée
+        self.line_edit_y0.setText(str(detected_t0))
+        
+        # 3. On appelle la fonction de mise à jour existante de Y0
+        # pour que la nouvelle valeur soit prise en compte dans le traitement et l'affichage.
+        # C'est une manière propre de déclencher la mise à jour complète.
+        self.on_y0_edited()
+
     def on_ylim_edited(self):
         self.basalt.traitementValues.T_lim = self._parse_input_to_float(self.line_edit_ylim.text(), return_none_if_empty=True)
         self.update_display()
@@ -956,12 +1132,10 @@ class MainWindow():
     def on_sub_mean_toggled(self, state):
         is_checked = (state == Qt.CheckState.Checked.value)
         self.basalt.traitementValues.is_sub_mean = is_checked
-        
-        # Activer/désactiver les options en fonction de la case
         self.combo_sub_mean_mode.setEnabled(is_checked)
-        # On active le champ de la fenêtre seulement si le mode est 'Mobile'
-        is_mobile_mode = (self.combo_sub_mean_mode.currentText() == 'Mobile')
-        self.line_edit_sub_mean_window.setEnabled(is_checked and is_mobile_mode)
+        
+        # On appelle la logique de visibilité
+        self.on_sub_mean_mode_changed(0) # 0 pour forcer la mise à jour de la visibilité
         
         self.update_display()
 
@@ -969,11 +1143,22 @@ class MainWindow():
         mode_text = self.combo_sub_mean_mode.currentText()
         self.basalt.traitementValues.sub_mean_mode = mode_text
         
-        # Activer/désactiver le champ de la taille de la fenêtre
-        is_mobile_mode = (mode_text == 'Mobile')
-        self.line_edit_sub_mean_window.setEnabled(is_mobile_mode)
+        is_globale_mode = (mode_text == 'Globale')
         
-        # Mettre à jour si la fonction est active
+        # On active les bons widgets et on cache les autres
+        self.globale_options_widget.setVisible(is_globale_mode)
+        self.globale_options_widget.setEnabled(self.checkbox_sub_mean.isChecked())
+        
+        self.mobile_options_widget.setVisible(not is_globale_mode)
+        self.mobile_options_widget.setEnabled(self.checkbox_sub_mean.isChecked())
+        
+        if self.basalt.traitementValues.is_sub_mean:
+            self.update_display()
+        
+    def on_trim_percent_edited(self):
+        valeur = self._parse_input_to_float(self.line_edit_trim_percent.text(), default_on_error=0.0)
+        self.basalt.traitementValues.sub_mean_trim_percent = valeur
+
         if self.basalt.traitementValues.is_sub_mean:
             self.update_display()
 
@@ -1006,6 +1191,7 @@ class MainWindow():
         print("Lancement de la migration depuis l'interface...")
         # On délègue le travail à une nouvelle méthode dans Basalt
         self.basalt.run_migration()
+        
         # Une fois la migration terminée, on met à jour l'affichage
         print("Mise à jour de l'affichage avec les données migrées...")
         self.redraw_plot() 
@@ -1065,6 +1251,16 @@ class MainWindow():
             self.basalt.traitementValues.profile_direction_mode = new_mode
             print(f"Mode de direction du profil changé en : {new_mode}")
             self.update_display()
+            
+    def on_interpolation_changed(self, mode: str):
+        """Met à jour le mode d'interpolation et rafraîchit le graphique."""
+        if self.basalt.data is None: return
+        
+        print(f"Mode d'interpolation changé en : '{mode}'")
+        self.basalt.traitementValues.interpolation_mode = mode
+        
+        # C'est un changement léger, on appelle redraw_plot
+        self.redraw_plot()
 
     def open_folder(self):
         """
@@ -1279,17 +1475,7 @@ class Basalt():
         self.traitement = Traitement(self.getTableCuté(self.data.dataFile),
                                  y_offset=self.traitementValues.T0)
         
-        if self.dewow : 
-            self.traitement.dewow_filter()
-
-        if self.traitementValues.is_sub_mean:
-            self.traitement.sub_mean(mode=self.traitementValues.sub_mean_mode,
-                                    window_size=self.traitementValues.sub_mean_window)
-        if self.traitementValues.is_filtre_freq : 
-            self.traitement.filtre_frequence(self.traitementValues.antenna_freq, 
-                                          self.traitementValues.sampling_freq)
-
-        # --- LOGIQUE D'INVERSION MIROIR ---
+                # --- LOGIQUE D'INVERSION MIROIR ---
         mode = self.traitementValues.profile_direction_mode
         should_mirror = False
         
@@ -1304,6 +1490,20 @@ class Basalt():
         if should_mirror:
             self.traitement.apply_mirror()
         # --- FIN DE LA LOGIQUE ---
+
+        if self.traitementValues.is_dewow_active : 
+            self.traitement.dewow_filter()
+
+        if self.traitementValues.is_sub_mean:
+            self.traitement.sub_mean(
+                mode=self.traitementValues.sub_mean_mode,
+                window_size=self.traitementValues.sub_mean_window,
+                trim_percent=self.traitementValues.sub_mean_trim_percent 
+            )
+
+        if self.traitementValues.is_filtre_freq : 
+            self.traitement.filtre_frequence(self.traitementValues.antenna_freq, 
+                                          self.traitementValues.sampling_freq)
 
         self.traitement.apply_total_gain(t0_exp = self.traitementValues.t0_exp,
                                           t0_lin = self.traitementValues.t0_lin,
@@ -1369,6 +1569,64 @@ class Basalt():
         
         return cropped_data
 
+    def detect_t0(self):
+        """
+        Détecte l'échantillon du pic de la première arrivée avec une zone de recherche contrôlée.
+        """
+        if self.data is None:
+            return 0
+
+        raw_data = self.data.dataFile
+        t0_offset = 0
+
+        if self.antenna == Radar.GSSI_FLEX:
+            print("Cas GSSI Flex détecté. Analyse du canal sélectionné.")
+            data_to_analyze = self._getFlexData(raw_data)
+            if not self.boolFlex:
+                t0_offset = raw_data.shape[0] // 2
+        else:
+            data_to_analyze = raw_data.copy()
+
+        if data_to_analyze.size == 0:
+            return 0
+
+        # --- DÉBUT DE LA NOUVELLE LOGIQUE DE RECHERCHE ---
+
+        # 1. Définir les limites de la recherche
+        start_sample = 10  # On ignore toujours le tout premier échantillon
+        
+        # Par défaut, on cherche jusqu'à la fin du tableau analysé
+        end_sample = data_to_analyze.shape[0] 
+        
+        # Règle spécifique pour les GSSI Flex : on ne dépasse pas l'échantillon 1022
+        if self.antenna == Radar.GSSI_FLEX:
+            end_sample = 1022
+            print(f"Zone de recherche pour Flex limitée à [{start_sample}, {end_sample}]")
+
+        # On s'assure que la zone de recherche est valide
+        if start_sample >= end_sample:
+            print("Avertissement : Zone de recherche invalide. Retour à 0.")
+            return 0
+
+        # 2. Le calcul se fait sur le tableau complet, mais la recherche est limitée
+        abs_data = np.abs(data_to_analyze.astype(np.float32))
+        mean_energy_trace = np.mean(abs_data, axis=1)
+        
+        # 3. On applique argmax UNIQUEMENT sur la tranche qui nous intéresse
+        # L'indice retourné sera RELATIF au début de cette tranche (c'est-à-dire à start_sample)
+        relative_index = np.argmax(mean_energy_trace[start_sample:end_sample])
+        
+        # 4. On calcule l'index local en ajoutant le point de départ de la recherche
+        local_t0_sample = relative_index + start_sample
+        
+        # --- FIN DE LA NOUVELLE LOGIQUE ---
+
+        # 5. On calcule l'indice absolu en ajoutant l'offset du canal (pour Flex)
+        absolute_t0_sample = local_t0_sample + t0_offset
+        
+        print(f"T0 automatiquement détecté à l'échantillon absolu : {absolute_t0_sample}")
+        return absolute_t0_sample
+
     def get_plot_axes_parameters(self):
         """
         Calcule l'extent et les labels pour le graphique en fonction des unités choisies.
@@ -1433,27 +1691,28 @@ class Basalt():
 
     def run_migration(self):
         """Prépare les paramètres et lance la migration de Kirchhoff."""
-        if self.traitement is None or self.data is None:
-            return
+ 
+        if self.traitement is None or self.data is None: return
 
-        # 1. Collecter les "ingrédients"
         header = self.data.header
-        
-        # Vitesse de propagation
         v = cste_global["c_lum"] / sqrt(self.traitementValues.epsilon)
         
-        # Pas de temps (dt) en secondes
-        dt_s = (header.value_time * 1e-9) / header.value_sample if header.value_sample else 0
+        # --- Logique pour dt_s et dx_m ---
+        time_window_ns = header.value_time
+        total_samples_in_file = header.value_sample
         
-        # Pas de distance (dx) en mètres
+        if self.antenna == Radar.GSSI_FLEX:
+            time_window_ns /= 2.0
+            total_samples_in_file /= 2.0
+            
+        dt_s = (time_window_ns * 1e-9) / total_samples_in_file if total_samples_in_file else 0
         dx_m = header.value_dist_total / header.value_trace if header.value_trace else 0
+        # ---------------------------------
         
-        # Ouverture de migration (en mètres) - une valeur de 2 à 3 mètres est un bon début
         aperture_m = 2.0 
 
-        # 2. Appeler la fonction de traitement
         self.traitement.apply_kirchhoff_migration(dx=dx_m, dt=dt_s, v=v, aperture_m=aperture_m)
-        
+
     @property
     def getExportName(self):
         return self.folder + "/" + self.selectedFile.stem + ".png"
@@ -1755,26 +2014,30 @@ class Traitement():
         
         self.data = (data_float - moving_average).astype(self.data.dtype)
 
-    def sub_mean(self, mode: str, window_size: int):
+    def sub_mean(self, mode: str, window_size: int, trim_percent: float):
         """
-        Soustrait la trace moyenne en mode 'Globale' ou 'Mobile'.
-        Version optimisée sans boucle for.
-
-        Args:
-            mode (str): 'Globale' ou 'Mobile'.
-            window_size (int): Taille de la fenêtre pour le mode mobile (doit être un entier impair).
+        Soustrait la trace de fond en mode 'Globale' (moyenne tronquée) ou 'Mobile'.
         """
-        print(f"Application du retrait de trace moyenne en mode '{mode}'...")
-        
-        # On travaille sur une copie en flottant
+        print(f"Application du retrait de trace en mode '{mode}'...")
         data_float = self.data.astype(np.float32)
 
         if mode == 'Globale':
-            # Calcul de la moyenne de toutes les traces, en une seule ligne
-            mean_trace = np.mean(data_float, axis=1, keepdims=True)
-            # Soustraction de la moyenne à toutes les traces en une seule opération (broadcasting)
-            self.data = (data_float - mean_trace).astype(self.data.dtype)
-            
+                proportion_to_cut = trim_percent / 100.0
+                
+                # --- LOGIQUE CONDITIONNELLE ---
+                if proportion_to_cut > 0:
+                    print(f"Calcul de la moyenne tronquée à {trim_percent}%...")
+                    nt, nx = data_float.shape
+                    mean_trace = np.zeros(nt, dtype=np.float32)
+                    for i in range(nt):
+                        mean_trace[i] = trim_mean(data_float[i, :], proportion_to_cut)
+                else:
+                    print("Calcul de la moyenne standard (pas d'élagage)...")
+                    mean_trace = np.mean(data_float, axis=1) # Pas besoin de keepdims ici
+                
+                self.data = (data_float - mean_trace[:, np.newaxis]).astype(self.data.dtype)
+
+                
         elif mode == 'Mobile':
             # Assurer que la taille de la fenêtre est un entier impair
             if window_size % 2 == 0:
@@ -1835,37 +2098,32 @@ class Traitement():
         Applique la migration de Kirchhoff aux données.
         """
         print("Début de la migration de Kirchhoff...")
-        nt, nx = self.data.shape # nt = nombre de samples, nx = nombre de traces
+        nt, nx = self.data.shape
 
-        # Vérifications des paramètres
         if nt == 0 or dx == 0 or dt == 0 or v == 0:
-            print("Erreur : Paramètres de migration invalides (dx, dt, v ne peuvent pas être nuls).")
+            print("Erreur: Paramètres de migration invalides.")
             return
             
-        # Convertir l'ouverture de mètres en nombre de traces
         aperture_traces = int(aperture_m / dx)
-
-        # Créer un tableau vide pour recevoir les données migrées
         migrated_data = np.zeros_like(self.data, dtype=np.float64)
         data_float = self.data.astype(np.float64)
 
-        # --- LIGNE DE CODE CORRIGÉE ---
-        # L'appel à la fonction _kirchhoff_migration_loop doit être une
-        # assignation de variable complète comme ceci :
+        print(f"AVANT migration: min={np.min(data_float):.2f}, max={np.max(data_float):.2f}")
+
+        # Appel à la fonction Numba, en passant self.y_offset
         migrated_data = _kirchhoff_migration_loop(
-            data_float, migrated_data, nt, nx, dt, dx, v, aperture_traces
+            data_float, migrated_data, nt, nx, dt, dx, v, aperture_traces, self.y_offset
         )
-        # --- FIN DE LA CORRECTION ---
+        
         print(f"APRÈS migration: min={np.min(migrated_data):.2f}, max={np.max(migrated_data):.2f}")
         self.data = migrated_data.astype(self.data.dtype)
         print("Migration terminée.")
-
 
 class Graphique():
     def __init__(self, ax : plt.Axes, fig : Figure):
         self.vmin = -5e9
         self.vmax = 5e9
-        self.contraste = 1.0
+        self.contraste = 0.5
         self.fig : Figure = fig
         self.ax : plt.Axes = ax
         self.im = None
@@ -1876,11 +2134,11 @@ class Graphique():
     def setHorizontalgrid(self,flag : bool):
         self.ax.grid(visible=flag, axis='y',linewidth = 0.5, color = "black", linestyle ='-.')
 
-    def plot(self, data, title:str, x_ticks: int, y_ticks: int, extent: list, xlabel: str, ylabel: str, show_x_ticks: bool, show_y_ticks: bool):
+    def plot(self, data, title:str, x_ticks: int, y_ticks: int, extent: list, xlabel: str, ylabel: str, show_x_ticks: bool, show_y_ticks: bool, interpolation_mode: str):
         titre_complet = "Scan : " + title
         
         if self.im is None:
-            self.im = self.ax.imshow(data, cmap="gray", aspect="auto", interpolation='bicubic', extent=extent)
+            self.im = self.ax.imshow(data, cmap="gray", aspect="auto", interpolation=interpolation_mode, extent=extent)
             self.fig.suptitle(titre_complet, y=0.05, fontsize=12)
             self.ax.xaxis.set_label_position('top')
             self.ax.xaxis.set_ticks_position('top')
@@ -1888,6 +2146,7 @@ class Graphique():
             self.im.set_data(data)
             self.im.set_extent(extent)
             self.fig.suptitle(titre_complet, y=0.05, fontsize=12)
+            self.im.set_interpolation(interpolation_mode)
 
         self.ax.set_xlim(extent[0], extent[1])
         self.ax.set_ylim(extent[2], extent[3])
@@ -1925,7 +2184,7 @@ class Graphique():
 
         self.ax.figure.canvas.draw()
 
-    def plot_trace(self, trace_data, y_values, xlabel: str, ylabel: str):
+    def plot_trace(self, trace_data, y_values, xlabel: str, ylabel: str,y_cursor_pos: float = None, x_cursor_pos: float = None):
         """
         Efface et redessine le graphique pour afficher une seule trace (courbe 1D).
         """
@@ -1935,6 +2194,15 @@ class Graphique():
         # 2. On trace les données : amplitude en X, profondeur/temps/sample en Y
         self.ax.plot(trace_data, y_values, color='blue', linewidth=0.8)
         
+          # Dessine la ligne horizontale du curseur Y si une position est fournie
+        if y_cursor_pos is not None:
+            self.ax.axhline(y=y_cursor_pos, color='limegreen', linestyle=':', linewidth=1.5)
+            
+        # Dessine la ligne verticale du curseur X (amplitude) si une position est fournie
+        if x_cursor_pos is not None:
+            self.ax.axvline(x=x_cursor_pos, color='limegreen', linestyle=':', linewidth=1.5)
+
+
         # 3. On configure les axes
         self.ax.set_xlabel(xlabel)
         self.ax.xaxis.set_label_position('top')
