@@ -1326,7 +1326,8 @@ class MainWindow():
         en utilisant les paramètres de traitement courants.
         """
         # 1. Vérifier qu'il y a des fichiers à exporter
-        if self.listFile_widget.count() == 0:
+        count = self.listFile_widget.count()
+        if count == 0:
             print("Aucun fichier dans la liste à exporter.")
             return
 
@@ -1339,44 +1340,46 @@ class MainWindow():
 
         print(f"Début de l'export vers le dossier : {output_folder}")
 
-        # 3. Boucler sur tous les éléments de la QListWidget
-        for i in range(self.listFile_widget.count()):
-            item = self.listFile_widget.item(i)
-            scan_name = item.text()
+        # --- DÉBUT DE LA CORRECTION ---
+
+        # 3. On récupère la liste des fichiers à traiter UNE SEULE FOIS avant la boucle.
+        # Cette liste est garantie d'être dans le même ordre que ce qui est affiché.
+        files_to_export = self.basalt.getFilesFiltered(
+            extension_filter=self.constante.getFiltreExtension(self.combo_box_extension.currentText()),
+            freq_key=self.constante.getFiltreFreq(self.combo_box_frequence.currentText())
+        )
+
+        # Sécurité supplémentaire
+        if len(files_to_export) != count:
+            print("Erreur : La liste de fichiers a changé. Veuillez relancer l'export.")
+            return
+
+        # 4. On boucle sur la liste des fichiers préparée
+        for i, file_path_to_process in enumerate(files_to_export):
+            scan_name = file_path_to_process.stem
             
-            print(f"Traitement du fichier {i+1}/{self.listFile_widget.count()} : {scan_name}")
+            print(f"Traitement du fichier {i+1}/{count} : {scan_name}")
 
-            # 4. Simuler un clic sur le fichier pour le charger et le traiter
-            # Trouvons le chemin complet du fichier
-            # Note: cette recherche peut être optimisée, mais elle est robuste
-            file_path_to_process = None
-            current_files_in_list = self.basalt.getFilesFiltered(
-                self.constante.getFiltreFreq(self.combo_box_frequence.currentText()),
-                self.basalt.getFilesInFolder(self.constante.getFiltreExtension(self.combo_box_extension.currentText()))
-            )
-            for file in current_files_in_list:
-                if file.stem == scan_name:
-                    file_path_to_process = file
-                    break
-            
-            if file_path_to_process:
-                # On charge et on traite le fichier avec les paramètres actuels
-                self.basalt.setSelectedFile(file_path_to_process, self.constante.getRadarByExtension(file_path_to_process.suffix))
-                self.update_display() # Cette fonction fait tout : traitement + mise à jour du graphique
+            # 5. On charge et on traite le fichier avec les paramètres actuels
+            # On passe l'index 'i' pour la gestion du mode serpentin
+            self.basalt.setSelectedFile(file_path_to_process, self.constante.getRadarByExtension(file_path_to_process.suffix), i)
+            self.update_display() # Cette fonction fait tout : traitement + affichage
 
-                # 5. Construire le nom du fichier de sortie et sauvegarder
-                output_filename = os.path.join(output_folder, scan_name + "_traite.png")
-                try:
-                    self.fig.savefig(output_filename, dpi=300)
-                    print(f" -> Fichier sauvegardé : {output_filename}")
-                except Exception as e:
-                    print(f" -> ERREUR lors de la sauvegarde de {output_filename} : {e}")
+            # 6. Construire le nom du fichier de sortie et sauvegarder
+            output_filename = os.path.join(output_folder, scan_name + "_traite.png")
+            try:
+                # On utilise la méthode de la bonne figure (self.fig pour le radargramme)
+                self.fig.savefig(output_filename, dpi=300)
+                print(f" -> Fichier sauvegardé : {output_filename}")
+            except Exception as e:
+                print(f" -> ERREUR lors de la sauvegarde de {output_filename} : {e}")
 
-            # 6. Ligne CRUCIALE pour garder l'interface réactive pendant la boucle
+            # 7. Ligne CRUCIALE pour garder l'interface réactive pendant la boucle
             QApplication.processEvents()
 
+        # --- FIN DE LA CORRECTION ---
+
         print("--- Export de tous les scans terminé ! ---")
-        # On pourrait afficher un QMessageBox pour confirmer la fin de l'export
 
     @property
     def getFiles(self): 
@@ -1475,7 +1478,7 @@ class Basalt():
         self.traitement = Traitement(self.getTableCuté(self.data.dataFile),
                                  y_offset=self.traitementValues.T0)
         
-                # --- LOGIQUE D'INVERSION MIROIR ---
+        # --- LOGIQUE D'INVERSION MIROIR ---
         mode = self.traitementValues.profile_direction_mode
         should_mirror = False
         
@@ -1878,15 +1881,32 @@ class RadarData():
                     elif "ANTENNAS" in line:
                         value = line.split(':')[1]
                         self.value_antenna = value           
-            elif radar == Radar.GSSI_FLEX or radar == Radar.GSSI_XT:
-                    self.hdr = dzt.readgssi(infile=file, zero=[0])[0]
-                    self.value_trace = self.hdr['shape'][1]
-                    self.value_sample = self.hdr['shape'][0]
-                    self.value_dist_total = self.value_trace / self.hdr['dzt_spm']
-                    self.value_time = self.hdr['rhf_range']
-                    self.value_step = self.hdr['dzt_spm']
-                    self.value_step_time_acq = self.hdr['dzt_sps']
-                    self.value_antenna = self.hdr['rh_antname'][0]
+            elif radar == Radar.GSSI_FLEX:
+                self._read_gssi_header(file)
+
+                print("Ajustement des dimensions pour GSSI Flex (1 canal).")
+                #self.value_sample //= 2
+                #self.value_time /= 2.0
+                # La distance est parcourue une seule fois pour les 2 canaux, donc on divise par 2
+                #self.value_dist_total /= 2.0
+                # Le nombre de traces par canal est la moitié du total
+                # Cette ligne est optionnelle si vous gardez le sélecteur de canal
+                # mais la garder assure la cohérence.
+                # self.value_trace //= 2 
+            
+            elif radar == Radar.GSSI_XT:
+                self._read_gssi_header(file)
+
+        def _read_gssi_header(self, file: Path):
+            self.hdr = dzt.readgssi(infile=file, zero=[0])[0]
+            self.value_trace = self.hdr['shape'][1]
+            self.value_sample = self.hdr['shape'][0]
+            self.value_dist_total = self.value_trace / self.hdr['dzt_spm']
+            self.value_time = self.hdr['rhf_range']
+            self.value_step = self.hdr['dzt_spm']
+            self.value_step_time_acq = self.hdr['dzt_sps']
+            self.value_antenna = self.hdr['rh_antname'][0]
+                    
 
 class Traitement():
     """
@@ -2037,7 +2057,6 @@ class Traitement():
                 
                 self.data = (data_float - mean_trace[:, np.newaxis]).astype(self.data.dtype)
 
-                
         elif mode == 'Mobile':
             # Assurer que la taille de la fenêtre est un entier impair
             if window_size % 2 == 0:
@@ -2249,3 +2268,5 @@ if __name__ == '__main__':
     software_name = "Basalt - Le radar en profondeur"
     main_window = MainWindow(software_name)
     main_window.show()
+
+

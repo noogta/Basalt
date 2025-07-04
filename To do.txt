@@ -2,11 +2,12 @@ EN COURS
     Kirchoff : J'ai que des zérooooo Plus maintenant mais j'ai n'imp
     Export par tranche
     Découpage fichier flex : Ok mais fonctionne pas après les set de Y0 et yLim
+    Se passer de read gssi
 
 IMPORTANT
     Déconvolution
     Afficher % valeur
-
+    
 A VOIR
     Arrière plan export
 
@@ -15,10 +16,11 @@ DANS LONGTEMPS
     3D (avant ça hilbert et migration)
     Passer en web ?
     Afficher un stack de radargramme (ouvre 1 affiche en haut, puis si tu ouvres le 2, le 1 passe en bas et le 2 est ouvert en haut)
+    Fusionner canal 1 et 2 du flex (décallage 10 cm)  / Bi freq 
     Gain : normalization ; AGC ; décroissance de l'énergie
     Save 
 
-    
+
 FAIT
     Inversement trace
     Trier la liste
