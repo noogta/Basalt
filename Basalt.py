@@ -3,6 +3,7 @@ import os
 import readgssi.readgssi as dzt
 import re
 import numba
+import math 
 
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -17,7 +18,7 @@ from scipy.stats import trim_mean
 
 import sys
 from PyQt6.QtCore import Qt, QSettings
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton
+from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton
 from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtGui import QDoubleValidator, QValidator
@@ -90,6 +91,11 @@ class TraitementValues:
     a_exp : float = 0.0
     g : float = 1.0
     t_max_exp: int = 0
+
+    is_agc_active: bool = False
+    agc_window_size: int = 512 # Une bonne valeur par défaut
+    is_normalization_active: bool = False
+    is_energy_decay_active: bool = False
 
     is_dewow_active: bool = False
 
@@ -179,7 +185,7 @@ class MainWindow():
         self.window.setWindowTitle(softwarename)
         
         self.basalt :Basalt = Basalt()
-        
+        self.manual_gain_widgets = []
         self.window.setGeometry(100, 100, 1600, 900)
         settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
 
@@ -189,6 +195,7 @@ class MainWindow():
 
         last_folder = settings.value("last_folder", "") # "" est la valeur par défaut
         self.basalt.last_used_folder = last_folder
+        last_extension = settings.value("last_extension_filter", self.constante.ext_list[0])
 
         # UI 
         self.window.central_widget = QWidget()
@@ -203,6 +210,8 @@ class MainWindow():
         # On peut fixer la largeur du panneau de contrôle pour un meilleur design
         self.control_panel_widget.setFixedWidth(350)
         self.init_ui()
+
+        self.combo_box_extension.setCurrentText(last_extension)
 
         self.menu()
 
@@ -254,6 +263,9 @@ class MainWindow():
         # Sauvegarde du dernier dossier utilisé
         settings.setValue("last_folder", self.basalt.last_used_folder)
         
+        # Sauvegarde de la combobox de filtre fichier
+        settings.setValue("last_extension_filter", self.combo_box_extension.currentText())
+
         # On accepte l'événement de fermeture pour que l'application se ferme normalement
         event.accept()
 
@@ -281,6 +293,11 @@ class MainWindow():
         save_imgs_action.triggered.connect(self.exportPNG_all)
         file_menu.addAction(save_imgs_action)
    
+        file_menu.addSeparator()
+        export_sections_action = QAction("Exporter par Sections...", self.window)
+        export_sections_action.triggered.connect(self.on_export_by_section_clicked)
+        file_menu.addAction(export_sections_action)
+
     def init_ui(self):
         #---Liste des fichier
         self.listFile_widget = QListWidget()
@@ -545,99 +562,105 @@ class MainWindow():
         # 2. Appeler la fonction de redessin pour afficher le résultat
         self.redraw_plot()
         
+
     def create_gain_page(self):
-        """Crée et retourne la page des paramètres de gain."""
+        """Crée et retourne la page des paramètres de gain, sans GroupBox."""
         gain_widget = QWidget()
-        gain_layout = QVBoxLayout(gain_widget) # Un layout vertical pour cette page
+        gain_layout = QVBoxLayout(gain_widget)
 
-        # Titre pour la section Gain Constant
-        label_constant_gain = QLabel("--- Gain constant ---")
-        label_constant_gain.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        gain_layout.addWidget(label_constant_gain)
-        
-        # Paramètre g
-        g_layout = QHBoxLayout()
-        g_layout.addWidget(QLabel("g:"))
-        self.line_edit_g = QLineEdit()
-        self.line_edit_g.setPlaceholderText("Coefficient g")
-        self.line_edit_g.setText("1") # Valeur par défaut
-        self.line_edit_g.setValidator(self.float_validator)
-        g_layout.addWidget(self.line_edit_g)
+        # --- Section des Gains Manuels ---
+        label_manual_gain = QLabel("--- Gains Manuels ---")
+        label_manual_gain.setStyleSheet("font-weight: bold;")
+        gain_layout.addWidget(label_manual_gain)
+
+        # --- Gains Manuels ---
+        self.manual_gain_widgets = []
+
+        # On crée les QLineEdit une seule fois
+        self.line_edit_g = QLineEdit("1.0")
+        self.line_edit_a_lin = QLineEdit("0.0")
+        self.line_edit_t0_lin = QLineEdit("0.0")
+        self.line_edit_a_exp = QLineEdit("1.0")
+        self.line_edit_T0_exp = QLineEdit("0.0")
+        self.line_edit_t_max_exp = QLineEdit("0")
+
+        # On définit TOUTE la structure de l'interface dans cette liste
+        manual_gain_config = [
+            ("Gain constant", None, None), # Sous-titre
+            ("g:", self.line_edit_g, "Coefficient g constant"),
+            ("Gain Linéaire", None, None), # Sous-titre
+            ("a_lin:", self.line_edit_a_lin, "Amplitude linéaire"),
+            ("t0_lin:", self.line_edit_t0_lin, "Temps initial linéaire"),
+            ("Gain Exponentiel", None, None), # Sous-titre
+            ("a_exp:", self.line_edit_a_exp, "Amplitude exponentielle"),
+            ("T0_exp:", self.line_edit_T0_exp, "Temps initial exponentiel"),
+            ("t_max_exp:", self.line_edit_t_max_exp, "Fin du gain expo (sample)")
+        ]
+
+        # La boucle crée maintenant l'interface à partir de la config
+        for label_text, line_edit, placeholder in manual_gain_config:
+            # Si c'est un sous-titre (pas d'objet QLineEdit associé)
+            if line_edit is None:
+                label = QLabel(label_text)
+                label.setStyleSheet("font-style: italic; font-size: 11pt; margin-top: 2px;")
+                gain_layout.addWidget(label)
+            # Sinon, c'est un champ de saisie normal
+            else:
+                h_layout = QHBoxLayout()
+                h_layout.addWidget(QLabel(label_text))
+                line_edit.setPlaceholderText(placeholder)
+                line_edit.setValidator(self.float_validator)
+                h_layout.addWidget(line_edit)
+                gain_layout.addLayout(h_layout)
+                self.manual_gain_widgets.append(line_edit) # On ajoute à la liste pour le contrôle
+
+        #gain_layout.addSpacing(15)
+
+
+        # --- Section des Gains Automatiques ---
+        label_auto_gain = QLabel("--- Gains Automatiques ---")
+        label_auto_gain.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        gain_layout.addWidget(label_auto_gain)
+
+        # Création des widgets de gain automatique
+        self.checkbox_agc = QCheckBox("Gain automatique (AGC)")
+        self.line_edit_agc_window = QLineEdit(str(self.basalt.traitementValues.agc_window_size))
+        self.checkbox_normalization = QCheckBox("Normalisation par trace")
+        self.checkbox_energy_decay = QCheckBox("Compensation de la décroissance d'énergie")
+
+        # Ajout des widgets AGC au layout
+        gain_layout.addWidget(self.checkbox_agc)
+        agc_options_layout = QHBoxLayout()
+        agc_options_layout.addWidget(QLabel("Fenêtre AGC (samples):"))
+        self.line_edit_agc_window.setValidator(QDoubleValidator(1, 4096, 0))
+        agc_options_layout.addWidget(self.line_edit_agc_window)
+        gain_layout.addLayout(agc_options_layout)
+        gain_layout.addSpacing(10)
+
+        # Ajout des autres widgets auto
+        gain_layout.addWidget(self.checkbox_normalization)
+        gain_layout.addWidget(self.checkbox_energy_decay)
+
+        gain_layout.addStretch()
+
+        # --- Connexion des signaux (une fois que TOUT est créé) ---
         self.line_edit_g.editingFinished.connect(self.on_g_edited)
-        gain_layout.addLayout(g_layout)
-
-        # Titre pour la section Gain Linéaire
-        label_linear_gain = QLabel("--- Gain Linéaire ---")
-        label_linear_gain.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        gain_layout.addWidget(label_linear_gain)
-
-  
-        # Paramètre a_lin
-        a_lin_layout = QHBoxLayout()
-        a_lin_layout.addWidget(QLabel("a_lin:"))
-        self.line_edit_a_lin = QLineEdit()
-        self.line_edit_a_lin.setPlaceholderText("Amplitude linéaire")
-        self.line_edit_a_lin.setText("0.0") # Valeur par défaut
-        self.line_edit_a_lin.setValidator(self.float_validator)
-        a_lin_layout.addWidget(self.line_edit_a_lin)
         self.line_edit_a_lin.editingFinished.connect(self.on_a_lin_edited)
-        gain_layout.addLayout(a_lin_layout)
-
-        # Paramètre t0_lin
-        t0_lin_layout = QHBoxLayout()
-        t0_lin_layout.addWidget(QLabel("t0_lin:"))
-        self.line_edit_t0_lin = QLineEdit()
-        self.line_edit_t0_lin.setPlaceholderText("Temps initial linéaire")
-        self.line_edit_t0_lin.setText("0.0") # Valeur par défaut
-        self.line_edit_t0_lin.setValidator(self.float_validator)
-        t0_lin_layout.addWidget(self.line_edit_t0_lin)
         self.line_edit_t0_lin.editingFinished.connect(self.on_t0_lin_edited)
-        gain_layout.addLayout(t0_lin_layout)
-
-        # Espaceur pour séparer les sections de gain
-        gain_layout.addSpacing(20)
-
-        # Titre pour la section Gain Exponentiel
-        label_exp_gain = QLabel("--- Gain Exponentiel ---")
-        label_exp_gain.setStyleSheet("font-weight: bold;")
-        gain_layout.addWidget(label_exp_gain)
-
-        # Paramètre a_exp
-        a_exp_layout = QHBoxLayout()
-        a_exp_layout.addWidget(QLabel("a_exp:"))
-        self.line_edit_a_exp = QLineEdit()
-        self.line_edit_a_exp.setPlaceholderText("Amplitude exponentielle")
-        self.line_edit_a_exp.setText("1.0") # Valeur par défaut
-        self.line_edit_a_exp.setValidator(self.float_validator)
-        a_exp_layout.addWidget(self.line_edit_a_exp)
         self.line_edit_a_exp.editingFinished.connect(self.on_a_exp_edited)
-        gain_layout.addLayout(a_exp_layout)
-
-        # Paramètre T0_exp
-        T0_exp_layout = QHBoxLayout()
-        T0_exp_layout.addWidget(QLabel("T0_exp:"))
-        self.line_edit_T0_exp = QLineEdit()
-        self.line_edit_T0_exp.setPlaceholderText("Temps initial exponentiel")
-        self.line_edit_T0_exp.setText("0.0") # Valeur par défaut
-        self.line_edit_T0_exp.setValidator(self.float_validator)
-        T0_exp_layout.addWidget(self.line_edit_T0_exp)
         self.line_edit_T0_exp.editingFinished.connect(self.on_T0_exp_edited)
-        gain_layout.addLayout(T0_exp_layout)
-
-        #Paramètre T_max_exp
-        t_max_exp_layout = QHBoxLayout()
-        t_max_exp_layout.addWidget(QLabel("t_max_exp:"))
-        self.line_edit_t_max_exp = QLineEdit()
-        self.line_edit_t_max_exp.setPlaceholderText("Fin du gain expo (sample), 0=fin trace")
-        self.line_edit_t_max_exp.setText("0") # Par défaut, 0 pour aller jusqu'au bout
-        self.line_edit_t_max_exp.setValidator(self.float_validator) # Peut-être utiliser un QIntValidator ici
-        t_max_exp_layout.addWidget(self.line_edit_t_max_exp)
         self.line_edit_t_max_exp.editingFinished.connect(self.on_t_max_exp_edited)
-        gain_layout.addLayout(t_max_exp_layout)
 
-        gain_layout.addStretch() # Pousse tous les éléments vers le haut
+        self.checkbox_agc.stateChanged.connect(self.on_agc_toggled)
+        self.line_edit_agc_window.editingFinished.connect(self.on_agc_window_edited)
+        self.checkbox_normalization.stateChanged.connect(self.on_normalization_toggled)
+        self.checkbox_energy_decay.stateChanged.connect(self.on_energy_decay_toggled)
+
+        # --- Mise à jour initiale de l'état (tout à la fin) ---
+        self._update_gain_controls_state()
 
         return gain_widget
+
     
     def create_filter_page(self):
         """Crée et retourne la page des paramètres de filtre."""
@@ -738,11 +761,44 @@ class MainWindow():
         filter_layout.addStretch() # Pousse les éléments vers le haut
 
         filter_layout.addSpacing(20)
+
+
+        # --- NOUVEAU BLOC : DÉCONVOLUTION ---
+        deconv_groupbox = QGroupBox("Déconvolution (Spiking)")
+        deconv_layout = QVBoxLayout(deconv_groupbox)
+
+        # Paramètres pour l'estimation de l'ondelette
+        wavelet_layout = QHBoxLayout()
+        wavelet_layout.addWidget(QLabel("Ondelette (samples):"))
+        self.line_edit_wavelet_start = QLineEdit("10") # Début de l'ondelette
+        self.line_edit_wavelet_end = QLineEdit("60")   # Fin de l'ondelette
+        wavelet_layout.addWidget(self.line_edit_wavelet_start)
+        wavelet_layout.addWidget(self.line_edit_wavelet_end)
+        deconv_layout.addLayout(wavelet_layout)
+
+        # Paramètre pour la régularisation (bruit)
+        noise_layout = QHBoxLayout()
+        noise_layout.addWidget(QLabel("Bruit (%):"))
+        self.line_edit_deconv_noise = QLineEdit("1.0") # 1% de bruit blanc
+        noise_layout.addWidget(self.line_edit_deconv_noise)
+        deconv_layout.addLayout(noise_layout)
+
+        # Bouton pour lancer le traitement
+        self.btn_apply_deconv = QPushButton("Appliquer la Déconvolution")
+        self.btn_apply_deconv.setToolTip("Améliore la résolution verticale. Utiliser après le gain.")
+        deconv_layout.addWidget(self.btn_apply_deconv)
+        
+        filter_layout.addWidget(deconv_groupbox)
+        # --- FIN DU BLOC DECONVOLUTION ---
+
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
         filter_layout.addWidget(line)
-        
+
+        # MIGRATION KIRCHOFF
+        self.btn_apply_deconv.clicked.connect(self.on_deconvolution_clicked)
+
         # Le bouton est maintenant ajouté directement au layout de la page
         self.btn_apply_migration = QPushButton("Appliquer la Migration Kirchhoff")
         self.btn_apply_migration.setToolTip("Attention : traitement lourd. Refocalise les hyperboles.")
@@ -850,7 +906,6 @@ class MainWindow():
 
         return options_widget
 
-
     def populate_listFile_widget(self):
         """Remplit le QListWidget avec les noms de fichiers, triés numériquement."""
         self.listFile_widget.clear()
@@ -864,7 +919,80 @@ class MainWindow():
         for file in sorted_files:
             list_item = QListWidgetItem(file.stem)
             self.listFile_widget.addItem(list_item)
-    
+
+    def on_export_by_section_clicked(self):
+        """
+        Exporte le radargramme actuel en plusieurs fichiers PNG de longueur définie.
+        """
+        if self.basalt.traitement is None or self.basalt.data is None:
+            QMessageBox.warning(self.window, "Exportation impossible", "Aucun radargramme n'est chargé et traité.")
+            return
+
+        # 1. Demander la longueur de la section
+        section_length, ok = QInputDialog.getDouble(self.window, "Longueur de Section", 
+                                                    "Entrez la longueur de chaque section (en mètres):", 
+                                                    20.0, 0.1, 10000.0, 1)
+        if not ok or section_length <= 0: return
+
+        # 2. Demander le dossier de destination
+        output_folder = QFileDialog.getExistingDirectory(self.window, "Choisir un dossier de destination")
+        if not output_folder: return
+
+        print(f"Début de l'export par sections de {section_length} m...")
+
+        # --- DÉBUT DE LA LOGIQUE CORRIGÉE ---
+
+        # 3. Sauvegarder les limites X actuelles directement depuis le modèle de données
+        original_x0 = self.basalt.traitementValues.X0
+        original_xlim = self.basalt.traitementValues.X_lim
+
+        # 4. Calculer les paramètres de conversion
+        header = self.basalt.data.header
+        distance_totale = self.basalt.traitementValues.X_dist if self.basalt.traitementValues.X_dist else header.value_dist_total
+        
+        if header.value_trace == 0:
+            print("Erreur : Nombre de traces nul, impossible de calculer la distance par trace.")
+            return
+        m_par_trace = distance_totale / header.value_trace
+        
+        num_sections = math.ceil(distance_totale / section_length)
+        base_filename = self.basalt.selectedFile.stem
+
+        # 5. Boucler pour créer chaque image
+        for i in range(num_sections):
+            start_m = i * section_length
+            end_m = min((i + 1) * section_length, distance_totale)
+            
+            print(f"Export de la section {i+1}/{num_sections} : de {start_m:.2f} m à {end_m:.2f} m")
+
+            # a. Convertir les distances en indices de trace
+            start_trace_idx = int(round(start_m / m_par_trace))
+            end_trace_idx = int(round(end_m / m_par_trace))
+            
+            # b. Mettre à jour le modèle de données DIRECTEMENT
+            self.basalt.traitementValues.X0 = start_trace_idx
+            self.basalt.traitementValues.X_lim = end_trace_idx
+            
+            # c. Forcer la mise à jour complète (traitement + affichage)
+            self.update_display()
+            QApplication.processEvents() # Laisser le temps à l'UI de se redessiner
+
+            # d. Sauvegarder le graphique
+            output_filename = os.path.join(output_folder, f"{base_filename}_section_{i+1:02d}_{start_m:.1f}-{end_m:.1f}m.png")
+            try:
+                self.fig.savefig(output_filename, dpi=300)
+                print(f" -> Fichier sauvegardé : {output_filename}")
+            except Exception as e:
+                print(f" -> ERREUR lors de la sauvegarde : {e}")
+
+        # 6. Restaurer les limites initiales dans le modèle de données
+        print("Restauration des limites d'affichage initiales.")
+        self.basalt.traitementValues.X0 = original_x0
+        self.basalt.traitementValues.X_lim = original_xlim
+        self.update_display() # Rafraîchir une dernière fois pour revenir à la vue d'origine
+        
+        QMessageBox.information(self.window, "Exportation terminée", f"{num_sections} sections ont été sauvegardées.")
+        print("--- Export par sections terminé ! ---")
 
     def on_extension_changed(self, extension_text: str):
         """
@@ -1182,6 +1310,27 @@ class MainWindow():
         # On relance un traitement complet pour appliquer/retirer le filtre
         self.update_display()
 
+    def on_deconvolution_clicked(self):
+        """Lance le processus de déconvolution."""
+        if self.basalt.traitement is None:
+            print("Veuillez charger et traiter un fichier d'abord.")
+            return
+            
+        try:
+            start = int(self.line_edit_wavelet_start.text())
+            end = int(self.line_edit_wavelet_end.text())
+            noise = float(self.line_edit_deconv_noise.text())
+            
+            print("Lancement de la déconvolution...")
+            self.basalt.run_deconvolution(start, end, noise)
+            
+            # On rafraîchit l'affichage pour voir le résultat
+            self.redraw_plot()
+            print("Déconvolution terminée.")
+            
+        except ValueError:
+            print("Erreur : Veuillez vérifier que les paramètres de l'ondelette sont des entiers valides.")
+            
     def on_migration_clicked(self):
         """Lance le processus de migration."""
         if self.basalt.data is None:
@@ -1217,6 +1366,51 @@ class MainWindow():
         valeur = int(self._parse_input_to_float(self.line_edit_t_max_exp.text(), default_on_error=0))
         self.basalt.traitementValues.t_max_exp = valeur
         self.update_display()
+
+
+    def _update_gain_controls_state(self):
+        """Met à jour l'état de tous les contrôles de gain."""
+        is_agc_on = self.checkbox_agc.isChecked()
+        is_norm_on = self.checkbox_normalization.isChecked()
+        is_energy_on = self.checkbox_energy_decay.isChecked()
+        
+        is_any_auto_on = is_agc_on or is_norm_on or is_energy_on
+        
+        # On désactive tous les widgets de gain manuel si un gain auto est actif
+        for widget in self.manual_gain_widgets:
+            widget.setEnabled(not is_any_auto_on)
+        
+        # On gère l'exclusivité des gains automatiques
+        self.checkbox_agc.setEnabled(not is_norm_on and not is_energy_on)
+        self.line_edit_agc_window.setEnabled(is_agc_on)
+        
+        self.checkbox_normalization.setEnabled(not is_agc_on and not is_energy_on)
+        
+        self.checkbox_energy_decay.setEnabled(not is_agc_on and not is_norm_on)
+
+    def on_energy_decay_toggled(self, state):
+        """Gère l'activation/désactivation de la compensation d'énergie."""
+        self.basalt.traitementValues.is_energy_decay_active = (state == Qt.CheckState.Checked.value)
+        self._update_gain_controls_state()
+        self.update_display()
+        
+    def on_agc_toggled(self, state):
+        self.basalt.traitementValues.is_agc_active = (state == Qt.CheckState.Checked.value)
+        self._update_gain_controls_state()
+        self.update_display()
+
+    def on_normalization_toggled(self, state):
+        self.basalt.traitementValues.is_normalization_active = (state == Qt.CheckState.Checked.value)
+        self._update_gain_controls_state()
+        self.update_display()
+
+    def on_agc_window_edited(self):
+        """Gère la modification de la taille de la fenêtre AGC."""
+        valeur = int(self._parse_input_to_float(self.line_edit_agc_window.text(), default_on_error=512))
+        self.basalt.traitementValues.agc_window_size = valeur
+        
+        if self.basalt.traitementValues.is_agc_active:
+            self.update_display()
 
     def on_show_x_ticks_changed(self, state):
         is_checked = (state == Qt.CheckState.Checked.value)
@@ -1454,7 +1648,6 @@ class Basalt():
         
         return filtered_list
 
-    
     def setSelectedFile(self, GPR_File:Path, radar : Radar, index_in_list: int = 0):
 
         self.antenna = radar
@@ -1507,8 +1700,16 @@ class Basalt():
         if self.traitementValues.is_filtre_freq : 
             self.traitement.filtre_frequence(self.traitementValues.antenna_freq, 
                                           self.traitementValues.sampling_freq)
+            
 
-        self.traitement.apply_total_gain(t0_exp = self.traitementValues.t0_exp,
+        if self.traitementValues.is_agc_active:
+            self.traitement.apply_agc(self.traitementValues.agc_window_size)
+        elif self.traitementValues.is_normalization_active:
+            self.traitement.apply_normalization()
+        elif self.traitementValues.is_energy_decay_active: 
+            self.traitement.apply_energy_decay_gain()
+        else:
+            self.traitement.apply_total_gain(t0_exp = self.traitementValues.t0_exp,
                                           t0_lin = self.traitementValues.t0_lin,
                                           g= self.traitementValues.g ,
                                           a_lin= self.traitementValues.a_lin ,
@@ -1691,6 +1892,14 @@ class Basalt():
         plot_extent = [x_start, x_end, y_end, y_start]
         
         return plot_extent, xlabel, ylabel
+
+    def run_deconvolution(self, wavelet_start: int, wavelet_end: int, noise_percent: float):
+        """Lance la déconvolution sur les données actuellement traitées."""
+        if self.traitement is None: return
+        
+        # Le calcul se fait sur les données déjà traitées (gain, etc.)
+        # mais AVANT la migration.
+        self.traitement.apply_spiking_deconvolution(wavelet_start, wavelet_end, noise_percent)
 
     def run_migration(self):
         """Prépare les paramètres et lance la migration de Kirchhoff."""
@@ -1906,7 +2115,6 @@ class RadarData():
             self.value_step = self.hdr['dzt_spm']
             self.value_step_time_acq = self.hdr['dzt_sps']
             self.value_antenna = self.hdr['rh_antname'][0]
-                    
 
 class Traitement():
     """
@@ -1980,8 +2188,6 @@ class Traitement():
                 last_gain_value = fgain[exp_mask][-1] # La dernière valeur calculée
                 fgain[flat_mask] = last_gain_value
         
-
-
         image_avec_gain = image_float * fgain[:, np.newaxis]
 
         # On s'assure que les valeurs ne dépassent pas les limites du type de données original
@@ -1996,7 +2202,105 @@ class Traitement():
 
         #except:
         #    print("Erreur lors de l'application des gains:")
-    
+
+    def apply_agc(self, window_size: int):
+        """
+        Applique un gain automatique (AGC) sur chaque trace.
+        """
+        print(f"Application de l'AGC avec une fenêtre de {window_size} samples...")
+        
+        # S'assurer que la fenêtre est au moins de 1
+        if window_size < 1: window_size = 1
+
+        # On travaille sur une copie en flottant
+        data_float = self.data.astype(np.float32)
+        
+        for i in range(data_float.shape[1]): # Boucle sur chaque trace
+            trace = data_float[:, i]
+            
+            # Calcul de l'enveloppe RMS (Root Mean Square) dans une fenêtre glissante
+            # C'est une manière efficace de calculer la puissance locale du signal
+            squared_trace = trace**2
+            window = np.ones(window_size) / window_size
+            rms_envelope = np.sqrt(np.convolve(squared_trace, window, mode='same'))
+            
+            # Facteur de gain : on inverse l'enveloppe pour amplifier les zones faibles
+            # On ajoute un epsilon pour éviter la division par zéro
+            gain_factor = 1.0 / (rms_envelope + 1e-9)
+            
+            # On applique le gain à la trace originale
+            data_float[:, i] = trace * gain_factor
+
+        # On normalise le résultat pour qu'il remplisse bien la plage de valeurs
+        max_abs = np.max(np.abs(data_float))
+        if max_abs > 0:
+            data_float /= max_abs
+
+        # On reconvertit au type d'origine en multipliant par la valeur max possible
+        val_max = np.iinfo(self.data.dtype).max
+        self.data = (data_float * val_max).astype(self.data.dtype)    
+
+    def apply_normalization(self):
+        """
+        Normalise chaque trace indépendamment pour que son amplitude max soit 1.
+        """
+        print("Application de la normalisation par trace...")
+        
+        if self.data.size == 0: return
+
+        data_float = self.data.astype(np.float32)
+        
+        # On calcule l'amplitude maximale absolue pour chaque trace (axe 0)
+        max_vals = np.max(np.abs(data_float), axis=0)
+        
+        # On ajoute un epsilon pour éviter la division par zéro pour les traces entièrement nulles
+        max_vals[max_vals == 0] = 1.0
+        
+        # On divise chaque trace par sa valeur maximale (NumPy gère le broadcasting)
+        normalized_data = data_float / max_vals
+        
+        # On reconvertit au type d'origine en remettant à l'échelle
+        val_max = np.iinfo(self.data.dtype).max
+        self.data = (normalized_data * val_max).astype(self.data.dtype)
+
+    def apply_energy_decay_gain(self):
+        """
+        Applique un gain basé sur l'inverse de la décroissance d'énergie moyenne.
+        """
+        print("Application du gain par compensation de la décroissance d'énergie...")
+        if self.data.size == 0: return
+
+        data_float = self.data.astype(np.float32)
+
+        # 1. Calculer la décroissance d'énergie moyenne
+        # On prend la moyenne des valeurs absolues de chaque ligne (échantillon de temps)
+        energy_decay_curve = np.mean(np.abs(data_float), axis=1)
+
+        # 2. Lisser la courbe pour obtenir la tendance générale
+        # La taille de la fenêtre de lissage est un paramètre important.
+        # Une fenêtre plus grande donne une courbe plus lisse.
+        smoothing_window = 50
+        smoothed_decay = uniform_filter1d(energy_decay_curve, size=smoothing_window, mode='reflect')
+
+        # 3. Créer la fonction de gain en inversant la courbe de décroissance
+        # On ajoute un epsilon pour éviter les divisions par zéro
+        gain_function = 1.0 / (smoothed_decay + 1e-9)
+
+        # 4. Normaliser la fonction de gain pour que le gain soit de 1 au début
+        if gain_function.size > 0:
+            gain_function /= gain_function[0]
+
+        # 5. Appliquer le gain à toutes les traces
+        gained_data = data_float * gain_function[:, np.newaxis]
+
+        # 6. Remettre les données à l'échelle du type de données d'origine
+        max_abs = np.max(np.abs(gained_data))
+        if max_abs > 0:
+            gained_data /= max_abs
+            
+        val_max = np.iinfo(self.data.dtype).max
+        self.data = (gained_data * val_max).astype(self.data.dtype)
+
     def get_bit_img(self):
         """
         Récupère le nombre de bits à partir d'un tableau (néccessaire pour les fonctions gain).
@@ -2100,6 +2404,43 @@ class Traitement():
         except Exception as e:
             print(f"Erreur lors de l'application du filtre passe-bande: {e}")
 
+    def apply_spiking_deconvolution(self, start: int, end: int, noise_percent: float):
+        """
+        Applique une déconvolution de Wiener pour compresser l'ondelette.
+        """
+        if end <= start:
+            print("Erreur Déconvolution : La fin de l'ondelette doit être après le début.")
+            return
+
+        # 1. Estimer l'ondelette en moyennant les premières traces
+        # On prend la moyenne des 10 premières traces pour une estimation robuste
+        num_traces_for_wavelet = min(10, self.data.shape[1])
+        wavelet_estimate = np.mean(self.data[start:end, :num_traces_for_wavelet], axis=1)
+
+        # 2. Appliquer la déconvolution trace par trace
+        deconvolved_data = np.zeros_like(self.data, dtype=np.float64)
+        nt, nx = self.data.shape
+
+        # Le filtre est la transformée de Fourier de l'ondelette
+        wavelet_fft = np.fft.fft(wavelet_estimate, n=nt)
+        
+        # Constante de régularisation (pour la stabilité en présence de bruit)
+        # C'est le "bruit blanc" qu'on ajoute, en pourcentage de l'énergie max de l'ondelette
+        k = (noise_percent / 100.0) * np.max(wavelet_fft * np.conj(wavelet_fft))
+
+        for i in range(nx):
+            trace = self.data[:, i]
+            trace_fft = np.fft.fft(trace, n=nt)
+            
+            # Application du filtre de Wiener dans le domaine fréquentiel
+            deconv_fft = (trace_fft * np.conj(wavelet_fft)) / (wavelet_fft * np.conj(wavelet_fft) + k)
+            
+            # Retour au domaine temporel et on ne garde que la partie réelle
+            deconvolved_data[:, i] = np.real(np.fft.ifft(deconv_fft))
+        
+        # On remplace les anciennes données par les données déconvoluées
+        self.data = deconvolved_data.astype(self.data.dtype)
+        
     def apply_mirror(self):
         """
         Inverse l'ordre des traces sur l'axe horizontal (effet miroir).
@@ -2111,7 +2452,7 @@ class Traitement():
         # ::-1 -> prend toutes les colonnes (les traces) mais avec un pas de -1,
         # ce qui inverse leur ordre.
         self.data = self.data[:, ::-1]
-    
+
     def apply_kirchhoff_migration(self, dx: float, dt: float, v: float, aperture_m: float):
         """
         Applique la migration de Kirchhoff aux données.
@@ -2262,7 +2603,6 @@ class Graphique():
         max_val = self.vmax * q
 
         return min_val, max_val
-
 
 if __name__ == '__main__':
     software_name = "Basalt - Le radar en profondeur"
