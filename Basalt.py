@@ -1064,14 +1064,14 @@ class MainWindow():
             file_to_process = current_files_in_list[row]
             radar_type = self.constante.getRadarByExtension(file_to_process.suffix)
 
-            # Si c'est un fichier GSSI Flex, on désactive le champ Y_lim
-            if radar_type == Radar.GSSI_FLEX:
-                self.line_edit_ylim.setEnabled(False)
-                # On vide le champ pour éviter toute confusion
-                self.line_edit_ylim.clear()
-            # Sinon, pour tous les autres types de fichiers, on s'assure qu'il est activé
-            else:
-                self.line_edit_ylim.setEnabled(True)       
+            # # Si c'est un fichier GSSI Flex, on désactive le champ Y_lim
+            # if radar_type == Radar.GSSI_FLEX:
+            #     self.line_edit_ylim.setEnabled(False)
+            #     # On vide le champ pour éviter toute confusion
+            #     self.line_edit_ylim.clear()
+            # # Sinon, pour tous les autres types de fichiers, on s'assure qu'il est activé
+            # else:
+            #     self.line_edit_ylim.setEnabled(True)       
             print(f"Fichier correspondant trouvé par index ({row}) : {file_to_process.name}")
             
             # 4. On charge le fichier en passant son index pour le mode serpentin
