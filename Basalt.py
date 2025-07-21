@@ -1790,8 +1790,7 @@ class Basalt():
 
     def _getDataTraité(self,data): 
         if self.antenna is Radar.GSSI_FLEX: 
-            return data
-            #return self._getFlexData(data)
+            return self._getFlexData(data)
         else:
             return data 
 
@@ -2031,28 +2030,26 @@ class RadarData():
             data = rd7
         
         elif(self.path.suffix == ".DZT"):
+            # Ouvrir le fichier en mode binaire
             with open(self.path, mode='rb') as DZTdata:
                 byte_data = DZTdata.read()
-            
-            # Use the 'offset' parameter to skip the 32768-byte header
-            DZT = np.frombuffer(byte_data, dtype=np.int32, offset=32768)
-            
-            # Reshape the data
+                # DZT est codé 4 octets
+            DZT = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
+            # Reshape de rd7
             DZT = DZT.reshape(self.header.value_trace, self.header.value_sample)
             DZT = DZT.transpose()
             data = DZT
         
         elif(self.path.suffix == ".dzt"): #Flex 
+            # Ouvrir le fichier en mode binaire
             with open(self.path, mode='rb') as DZTdata:
                 byte_data = DZTdata.read()
-            
-            # Use the 'offset' parameter to skip the 32768-byte header
-            DZT = np.frombuffer(byte_data, dtype=np.int32, offset=32768)
-            
-            # Reshape the data
-            DZT = DZT.reshape(self.header.value_trace, self.header.value_sample)
+                # DZT est codé 4 octets
+            DZT = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
+            # Reshape de rd7
+            DZT = DZT.reshape(self.header.value_trace, self.header.value_sample *2 )
             DZT = DZT.transpose()
-            data = DZT
+            data = DZT         
             # À supprimer
             #README
             # Si vous souhaitez rajouter d'autres format:
@@ -2183,39 +2180,66 @@ class RadarData():
                 self._read_gssi_header(file)
 
         def _read_gssi_header(self, file: Path):
-                    """Lit les champs essentiels d'un en-tête GSSI .dzt."""
-                    print(f"Lecture de l'en-tête GSSI pour {file.name}...")
-                    try:
-                        with open(file, 'rb') as f:
-                            f.seek(4)
-                            self.value_sample = struct.unpack('<h', f.read(2))[0]
-                            f.seek(14)
-                            spm = struct.unpack('<f', f.read(4))[0] # *2 pour le flex
-                            f.seek(26)
-                            self.value_time = struct.unpack('<f', f.read(4))[0]
+            """Lit les champs essentiels d'un en-tête GSSI .dzt dans le bon ordre."""
+            print(f"Lecture de l'en-tête GSSI pour {file.name}...")
+            try:
+                with open(file, 'rb') as f:
+                    # On lit le contenu entier de l'en-tête une seule fois
+                    header_bytes = f.read(1024)
 
-                            f.seek(0, 2)
-                            total_file_size = f.tell()
-                            header_size = 32768  # The size of the GSSI header in bytes
+                    # --- ÉTAPE 1 : Lire les paramètres de base ---
+                    # On utilise struct.unpack pour extraire les valeurs aux bons offsets (positions)
+                    
+                    # Nombre de samples par trace (ushort à l'offset 4)
+                    self.value_sample = struct.unpack('<h', header_bytes[4:6])[0]
+                    
+                    # Nombre de bits par sample (ushort à l'offset 6)
+                    self.bits = struct.unpack('<h', header_bytes[6:8])[0]
 
-                            # Subtract the header size to get the size of the actual data
-                            data_size = total_file_size - header_size
-                            
-                            bytes_per_sample = 4 # for int32
-                            trace_size_in_bytes = self.value_sample * bytes_per_sample
-                            
-                            if trace_size_in_bytes > 0:
-                                self.value_trace = int(data_size / trace_size_in_bytes)
-                            else:
-                                self.value_trace = 0
+                    # Scans par mètre (float à l'offset 14)
+                    spm = struct.unpack('<f', header_bytes[14:18])[0]
+                    self.value_step = spm
 
-                            self.value_dist_total = self.value_trace  / spm if spm > 0 else 0.0
+                    # Fenêtre temporelle en ns (float à l'offset 26)
+                    self.value_time = struct.unpack('<f', header_bytes[26:30])[0]
 
-                            f.seek(98)
-                            self.value_antenna = f.read(14).decode('utf-8', errors='ignore').split('\x00')[0]
-                    except Exception as e:
-                        print(f"Erreur critique lors de la lecture de l'en-tête GSSI : {e}")
+                    # Nombre de canaux (ushort à l'offset 52)
+                    self.num_channels = struct.unpack('<h', header_bytes[52:54])[0]
+                    if self.num_channels == 0: self.num_channels = 1 # Sécurité
 
+                    # Offset jusqu'aux données
+                    self.data_offset = struct.unpack('<h', header_bytes[2:4])[0] * 1024
+                    
+                    # Nom de l'antenne
+                    self.value_antenna = header_bytes[98:112].decode('utf-8', errors='ignore').strip('\x00')
+
+                    # --- ÉTAPE 2 : Calculer le nombre de traces ---
+                    f.seek(0, 2) # On va à la fin du fichier pour connaître sa taille totale
+                    total_file_size = f.tell()
+                    
+                    data_size = total_file_size - self.data_offset
+                    bytes_per_sample = self.bits / 8
+                    
+                    # Pour un fichier Flex, le nombre de samples total par position est (samples * nb_canaux)
+                    total_samples_per_position = self.value_sample * self.num_channels
+                    bytes_per_position = total_samples_per_position * bytes_per_sample
+                    
+                    if bytes_per_position > 0:
+                        self.value_trace = int(data_size / bytes_per_position)
+                    else:
+                        self.value_trace = 0
+
+                    # --- ÉTAPE 3 : Calculer les valeurs dérivées ---
+                    self.value_dist_total = self.value_trace / spm if spm > 0 else 0.0
+
+                    # --- CORRECTION FINALE pour GSSI Flex ---
+                    # if self.radar_type == Radar.GSSI_FLEX:
+                    #     self.value_sample //= 2
+                    #     self.value_time /= 2.0
+                        
+            except Exception as e:
+                print(f"Erreur critique lors de la lecture de l'en-tête GSSI : {e}")
+                
 class Traitement():
     """
         Données traités
