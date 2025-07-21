@@ -1,12 +1,14 @@
 import numpy as np
 import os
-import readgssi.readgssi as dzt
 import re
-import numba
 import math 
+import struct
 
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+
+import json
+from dataclasses import asdict
 
 from dataclasses import dataclass
 from enum import Enum
@@ -19,7 +21,7 @@ from scipy.stats import trim_mean
 import sys
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton
-from PyQt6.QtGui import QAction, QFont
+from PyQt6.QtGui import QAction, QFont, QIntValidator
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtGui import QDoubleValidator, QValidator
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -31,52 +33,6 @@ APPLICATION_NAME = "BasaltGPR"
 cste_global = {
     "c_lum": 299792458, # Vitesse de la lumière dans le vide en m/s
     }
-
-@numba.jit(nopython=True, cache=True)
-def _kirchhoff_migration_loop(data, migrated_data, nt, nx, dt, dx, v, aperture_traces, y_offset):
-    """
-    La boucle de migration principale, optimisée par Numba.
-    """
-    # Boucle sur chaque pixel de l'image de SORTIE (l'image migrée)
-    for i_x in range(nx):  # Pour chaque trace de sortie
-        # On peut ignorer le premier échantillon de sortie s'il est à t=0
-        for i_t in range(1, nt):  # Pour chaque échantillon de temps/profondeur
-            
-            # Temps (two-way) du point de sortie
-            t0 = i_t * dt
-            # Position x du point de sortie
-            x = i_x * dx
-            
-            # Profondeur z du point de sortie
-            z = v * t0 / 2.0
-            
-            sum_val = 0.0
-            
-            # On définit une "ouverture" pour limiter le calcul
-            start_trace = max(0, i_x - aperture_traces)
-            end_trace = min(nx, i_x + aperture_traces)
-
-            # Boucle sur les traces de l'image d'ENTRÉE (le radargramme) dans l'ouverture
-            for j_x in range(start_trace, end_trace):
-                xj = j_x * dx
-                
-                # Calcul du temps de parcours (équation de l'hyperbole de diffraction)
-                dist = np.sqrt((xj - x)**2 + z**2)
-                t_hyperbole = (2.0 * dist) / v
-                
-                # On convertit ce temps en indice de sample ABSOLU
-                i_t_in_absolu = int(round(t_hyperbole / dt))
-                
-                # On traduit l'indice absolu en indice LOCAL pour notre tableau découpé
-                i_t_local = i_t_in_absolu - y_offset
-                
-                # On vérifie que cet indice LOCAL est valide dans notre tableau découpé
-                if 0 <= i_t_local < nt:
-                    sum_val += data[i_t_local, j_x]
-
-            migrated_data[i_t, i_x] = sum_val
-
-    return migrated_data
 
 class Radar(Enum):
     MALA = 0
@@ -93,7 +49,7 @@ class TraitementValues:
     t_max_exp: int = 0
 
     is_agc_active: bool = False
-    agc_window_size: int = 512 # Une bonne valeur par défaut
+    agc_window_size: int = 120 # Une bonne valeur par défaut
     is_normalization_active: bool = False
     is_energy_decay_active: bool = False
 
@@ -129,6 +85,9 @@ class TraitementValues:
 
     profile_direction_mode: str = 'normal' # Options: 'normal', 'mirror_all', 'mirror_serpentine'
     interpolation_mode: str = 'nearest'
+
+    decimation_factor: int = 1
+    
  
 class Const():
     def __init__(self):
@@ -284,6 +243,16 @@ class MainWindow():
         open_folder_action = QAction("Ouvrir un dossier", self.window)
         open_folder_action.triggered.connect(self.open_folder)
         file_menu.addAction(open_folder_action)
+        
+        save_settings_action = QAction("Sauvegarder les paramètres de traitement...", self.window)
+        save_settings_action.triggered.connect(self.on_save_settings_clicked)
+        file_menu.addAction(save_settings_action)
+        
+        load_settings_action = QAction("Charger les paramètres de traitement...", self.window)
+        load_settings_action.triggered.connect(self.on_load_settings_clicked)
+        file_menu.addAction(load_settings_action)
+
+        file_menu.addSeparator()
 
         save_img_action = QAction("Sauvegarder l'image", self.window)
         save_img_action.triggered.connect(self.exportPNG)
@@ -796,18 +765,6 @@ class MainWindow():
         line.setFrameShadow(QFrame.Shadow.Sunken)
         filter_layout.addWidget(line)
 
-        # MIGRATION KIRCHOFF
-        self.btn_apply_deconv.clicked.connect(self.on_deconvolution_clicked)
-
-        # Le bouton est maintenant ajouté directement au layout de la page
-        self.btn_apply_migration = QPushButton("Appliquer la Migration Kirchhoff")
-        self.btn_apply_migration.setToolTip("Attention : traitement lourd. Refocalise les hyperboles.")
-        self.btn_apply_migration.clicked.connect(self.on_migration_clicked)
-        filter_layout.addWidget(self.btn_apply_migration)
-
-        # Connexion du signal
-        self.btn_apply_migration.clicked.connect(self.on_migration_clicked)
-
         return filter_widget
 
     def create_info_page(self):
@@ -903,6 +860,29 @@ class MainWindow():
         interpolation_layout.addWidget(self.combo_interpolation)
         options_layout.addLayout(interpolation_layout)
         # -----------------
+
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        options_layout.addWidget(line)
+
+        label_decimation = QLabel("--- Réduction des Données (Décimation) ---")
+        label_decimation.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        options_layout.addWidget(label_decimation)
+
+        decimation_layout = QHBoxLayout()
+        decimation_layout.addWidget(QLabel("Garder 1 trace sur :"))
+        
+        self.line_edit_decimation = QLineEdit(str(self.basalt.traitementValues.decimation_factor))
+        # On utilise un validateur d'entiers, de 1 à 100 par exemple
+        self.line_edit_decimation.setValidator(QIntValidator(1, 100)) 
+        self.line_edit_decimation.setToolTip("Ex: 2 pour garder une trace sur deux. 1 pour tout garder.")
+        decimation_layout.addWidget(self.line_edit_decimation)
+        options_layout.addLayout(decimation_layout)
+
+        # On connecte le signal
+        self.line_edit_decimation.editingFinished.connect(self.on_decimation_edited)
 
         return options_widget
 
@@ -1082,7 +1062,16 @@ class MainWindow():
         # 3. On vérifie que cet index est valide et on récupère le bon fichier directement
         if 0 <= row < len(current_files_in_list):
             file_to_process = current_files_in_list[row]
-        
+            radar_type = self.constante.getRadarByExtension(file_to_process.suffix)
+
+            # Si c'est un fichier GSSI Flex, on désactive le champ Y_lim
+            if radar_type == Radar.GSSI_FLEX:
+                self.line_edit_ylim.setEnabled(False)
+                # On vide le champ pour éviter toute confusion
+                self.line_edit_ylim.clear()
+            # Sinon, pour tous les autres types de fichiers, on s'assure qu'il est activé
+            else:
+                self.line_edit_ylim.setEnabled(True)       
             print(f"Fichier correspondant trouvé par index ({row}) : {file_to_process.name}")
             
             # 4. On charge le fichier en passant son index pour le mode serpentin
@@ -1091,7 +1080,7 @@ class MainWindow():
             # 5. On met à jour les champs de l'UI avec les infos du nouveau fichier
             header = self.basalt.data.header
             self.line_edit_freq_filtre.setText(f"{header.sampling_frequency / 1e6:.2f}")
-            self.line_edit_antenna_freq.setText(f"{header.antenna_frequency:.1f}")
+            #self.line_edit_antenna_freq.setText(f"{header.antenna_frequency:.1f}")
             self.line_edit_xlim.setPlaceholderText(f"Max: {header.value_trace}")
             self.line_edit_ylim.setPlaceholderText(f"Max: {header.value_sample}")
 
@@ -1331,20 +1320,6 @@ class MainWindow():
         except ValueError:
             print("Erreur : Veuillez vérifier que les paramètres de l'ondelette sont des entiers valides.")
             
-    def on_migration_clicked(self):
-        """Lance le processus de migration."""
-        if self.basalt.data is None:
-            print("Veuillez charger un fichier avant de lancer la migration.")
-            return
-            
-        print("Lancement de la migration depuis l'interface...")
-        # On délègue le travail à une nouvelle méthode dans Basalt
-        self.basalt.run_migration()
-        
-        # Une fois la migration terminée, on met à jour l'affichage
-        print("Mise à jour de l'affichage avec les données migrées...")
-        self.redraw_plot() 
-
     def on_g_edited(self):
         self.basalt.traitementValues.g = self._parse_input_to_float(self.line_edit_g.text(), default_on_error=1.0)
         self.update_display()
@@ -1406,11 +1381,63 @@ class MainWindow():
 
     def on_agc_window_edited(self):
         """Gère la modification de la taille de la fenêtre AGC."""
-        valeur = int(self._parse_input_to_float(self.line_edit_agc_window.text(), default_on_error=512))
+        valeur = int(self._parse_input_to_float(self.line_edit_agc_window.text(), default_on_error=120))
         self.basalt.traitementValues.agc_window_size = valeur
         
         if self.basalt.traitementValues.is_agc_active:
             self.update_display()
+
+    def on_save_settings_clicked(self):
+        """Ouvre une dialogue pour sauvegarder les paramètres de traitement."""
+        fileName, _ = QFileDialog.getSaveFileName(self.window, "Sauvegarder les paramètres", "", "Fichiers JSON (*.json);;Tous les fichiers (*)")
+        if fileName:
+            self.basalt.save_processing_settings(fileName)
+
+    def on_load_settings_clicked(self):
+        """Ouvre une dialogue pour charger les paramètres et met à jour l'UI."""
+        fileName, _ = QFileDialog.getOpenFileName(self.window, "Charger des paramètres", "", "Fichiers JSON (*.json);;Tous les fichiers (*)")
+        if fileName:
+            if self.basalt.load_processing_settings(fileName):
+                # Si le chargement a réussi, on met à jour toute l'interface
+                self._update_all_controls_from_model()
+
+                self.populate_listFile_widget()
+
+                # On relance un traitement complet pour appliquer les nouveaux paramètres
+                self.update_display()
+
+    def _update_all_controls_from_model(self):
+        """Met à jour tous les widgets de l'UI à partir des valeurs de traitementValues."""
+        print("Mise à jour de l'interface depuis les paramètres chargés...")
+        values = self.basalt.traitementValues
+        
+        # Exemples de mise à jour (à compléter pour tous vos widgets)
+        self.line_edit_epsilon.setText(str(values.epsilon))
+        self.line_edit_y0.setText(str(values.T0))
+        self.line_edit_x0.setText(str(values.X0))
+        self.line_edit_ylim.setText(str(values.T_lim) if values.T_lim is not None else "")
+        self.line_edit_xlim.setText(str(values.X_lim) if values.X_lim is not None else "")
+        
+        # Gains manuels
+        self.line_edit_g.setText(str(values.g))
+        self.line_edit_a_lin.setText(str(values.a_lin * 100)) # N'oubliez pas de remultiplier par 100
+        
+        # Gains automatiques
+        self.checkbox_agc.setChecked(values.is_agc_active)
+        self.checkbox_normalization.setChecked(values.is_normalization_active)
+        self.checkbox_energy_decay.setChecked(values.is_energy_decay_active)
+        self.line_edit_agc_window.setText(str(values.agc_window_size))
+        
+        # Filtres
+        self.checkbox_dewow.setChecked(values.is_dewow_active)
+        self.checkbox_sub_mean.setChecked(values.is_sub_mean)
+        self.combo_sub_mean_mode.setCurrentText(values.sub_mean_mode)
+        # ... etc. pour tous vos contrôles
+        
+        # IMPORTANT : On rafraîchit l'état des widgets (activé/désactivé)
+        self._update_gain_controls_state()
+        print("Mise à jour de l'interface terminée.")
+
 
     def on_show_x_ticks_changed(self, state):
         is_checked = (state == Qt.CheckState.Checked.value)
@@ -1455,6 +1482,22 @@ class MainWindow():
         
         # C'est un changement léger, on appelle redraw_plot
         self.redraw_plot()
+
+    def on_decimation_edited(self):
+        """Gère la modification du facteur de décimation."""
+        try:
+            valeur = int(self.line_edit_decimation.text())
+            if valeur < 1: # Sécurité pour éviter les valeurs nulles ou négatives
+                valeur = 1
+        except ValueError:
+            valeur = 1 # Valeur par défaut en cas d'erreur
+            
+        self.line_edit_decimation.setText(str(valeur)) # On remet le champ à jour
+        
+        if self.basalt.traitementValues.decimation_factor != valeur:
+            self.basalt.traitementValues.decimation_factor = valeur
+            print(f"Facteur de décimation mis à jour : {valeur}")
+            self.update_display()
 
     def open_folder(self):
         """
@@ -1512,7 +1555,6 @@ class MainWindow():
             except Exception as e:
                 print(f"Erreur lors de la sauvegarde de l'image : {e}")
                 # Ici aussi, un QMessageBox serait idéal pour notifier l'utilisateur de l'erreur
-
 
     def exportPNG_all(self):
         """
@@ -1653,16 +1695,46 @@ class Basalt():
         self.antenna = radar
         self.selectedFile = GPR_File
         self.current_file_index = index_in_list
-        self.data = RadarData(GPR_File,radar)
+        self.data = RadarData(GPR_File, radar, self.traitementValues.decimation_factor)
 
         # On garde la détection automatique des fréquences
         fs_hz = self.data.header.sampling_frequency
         self.traitementValues.sampling_freq = fs_hz
         print(f"Fréquence d'échantillonnage détectée : {fs_hz / 1e6:.2f} MHz")
 
-        ant_freq_mhz = self.data.header.antenna_frequency
-        self.traitementValues.antenna_freq = ant_freq_mhz
-        print(f"Fréquence d'antenne détectée : {ant_freq_mhz} MHz")
+    def save_processing_settings(self, filepath: str):
+        """Sauvegarde l'objet traitementValues dans un fichier JSON."""
+        try:
+            with open(filepath, 'w') as f:
+                # asdict convertit la dataclass en un dictionnaire simple
+                settings_dict = asdict(self.traitementValues)
+                #Chemin du dossier en cours
+                settings_dict['data_folder'] = self.folder
+                # json.dump écrit le dictionnaire dans le fichier
+                json.dump(settings_dict, f, indent=4)
+            print(f"Paramètres sauvegardés avec succès dans {filepath}")
+        except Exception as e:
+            print(f"Erreur lors de la sauvegarde des paramètres : {e}")
+
+    def load_processing_settings(self, filepath: str):
+        """Charge les paramètres depuis un fichier JSON et met à jour traitementValues."""
+        try:
+            with open(filepath, 'r') as f:
+                settings_dict = json.load(f)
+            
+            folder_path = settings_dict.pop('data_folder', None)
+            if folder_path and os.path.isdir(folder_path):
+                self.setFolder(folder_path)
+
+            # On met à jour l'objet existant avec les valeurs du fichier
+            for key, value in settings_dict.items():
+                if hasattr(self.traitementValues, key):
+                    setattr(self.traitementValues, key, value)
+            print(f"Paramètres chargés avec succès depuis {filepath}")
+            return True
+        except Exception as e:
+            print(f"Erreur lors du chargement des paramètres : {e}")
+            return False
 
     def traitementScan(self): ## problème : a chaque changement besoin de repasser par ici (traitement, epsilon, tout ça tout ça)
         """
@@ -1718,7 +1790,8 @@ class Basalt():
 
     def _getDataTraité(self,data): 
         if self.antenna is Radar.GSSI_FLEX: 
-            return self._getFlexData(data)
+            return data
+            #return self._getFlexData(data)
         else:
             return data 
 
@@ -1901,30 +1974,6 @@ class Basalt():
         # mais AVANT la migration.
         self.traitement.apply_spiking_deconvolution(wavelet_start, wavelet_end, noise_percent)
 
-    def run_migration(self):
-        """Prépare les paramètres et lance la migration de Kirchhoff."""
- 
-        if self.traitement is None or self.data is None: return
-
-        header = self.data.header
-        v = cste_global["c_lum"] / sqrt(self.traitementValues.epsilon)
-        
-        # --- Logique pour dt_s et dx_m ---
-        time_window_ns = header.value_time
-        total_samples_in_file = header.value_sample
-        
-        if self.antenna == Radar.GSSI_FLEX:
-            time_window_ns /= 2.0
-            total_samples_in_file /= 2.0
-            
-        dt_s = (time_window_ns * 1e-9) / total_samples_in_file if total_samples_in_file else 0
-        dx_m = header.value_dist_total / header.value_trace if header.value_trace else 0
-        # ---------------------------------
-        
-        aperture_m = 2.0 
-
-        self.traitement.apply_kirchhoff_migration(dx=dx_m, dt=dt_s, v=v, aperture_m=aperture_m)
-
     @property
     def getExportName(self):
         return self.folder + "/" + self.selectedFile.stem + ".png"
@@ -1933,7 +1982,7 @@ class RadarData():
     """
         Données Brutes
     """
-    def __init__(self, path :Path, radar: Radar):
+    def __init__(self, path :Path, radar: Radar, decimation_factor: int = 1):
         """
             path (str) : le chemin du fichier gpr
             pathHeader (str) : le chemin de rad et dxt
@@ -1941,6 +1990,7 @@ class RadarData():
             dataFile : les données
             header : le Header -_-
         """
+        self.decimation_factor = decimation_factor
         self.path :Path = path
         self.header = self.Header()
         self.header.readHeader(path,radar)
@@ -1955,6 +2005,9 @@ class RadarData():
     Return:
         Retourne le tableau numpy contenant les données de la zone sondée.
         """
+
+        data = None
+
         if(self.path.suffix == ".rd3"):
             # Ouvrir le fichier en mode binaire "rb"
             with open(self.path, mode='rb') as rd3data:  
@@ -1964,7 +2017,7 @@ class RadarData():
             # Reshape de rd3
             rd3 = rd3.reshape(self.header.value_trace, self.header.value_sample) 
             rd3 = rd3.transpose()
-            return rd3
+            data = rd3
         
         elif(self.path.suffix == ".rd7"):
             # Ouvrir le fichier en mode binaire "rb"
@@ -1975,29 +2028,31 @@ class RadarData():
             # Reshape de rd7
             rd7 = rd7.reshape(self.header.value_trace, self.header.value_sample)
             rd7 = rd7.transpose()
-            return rd7
+            data = rd7
         
         elif(self.path.suffix == ".DZT"):
-            # Ouvrir le fichier en mode binaire
             with open(self.path, mode='rb') as DZTdata:
                 byte_data = DZTdata.read()
-                # DZT est codé 4 octets
-            DZT = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
-            # Reshape de rd7
+            
+            # Use the 'offset' parameter to skip the 32768-byte header
+            DZT = np.frombuffer(byte_data, dtype=np.int32, offset=32768)
+            
+            # Reshape the data
             DZT = DZT.reshape(self.header.value_trace, self.header.value_sample)
             DZT = DZT.transpose()
-            return DZT
+            data = DZT
         
         elif(self.path.suffix == ".dzt"): #Flex 
-            # Ouvrir le fichier en mode binaire
             with open(self.path, mode='rb') as DZTdata:
                 byte_data = DZTdata.read()
-                # DZT est codé 4 octets
-            DZT = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
-            # Reshape de rd7
+            
+            # Use the 'offset' parameter to skip the 32768-byte header
+            DZT = np.frombuffer(byte_data, dtype=np.int32, offset=32768)
+            
+            # Reshape the data
             DZT = DZT.reshape(self.header.value_trace, self.header.value_sample)
             DZT = DZT.transpose()
-            return DZT            
+            data = DZT
             # À supprimer
             #README
             # Si vous souhaitez rajouter d'autres format:
@@ -2007,6 +2062,27 @@ class RadarData():
             # -4 Redimmensionnez votre tableau à l'aide du nombre de samples et de traces
             # -5 Transposez le tableau
     
+
+        if data is not None:
+            # On récupère le facteur depuis la classe Basalt.
+            # C'est une petite entorse à l'architecture mais c'est le plus simple ici.
+            # Pour cela, il faut passer une référence à l'objet Basalt.
+            # (Voir la correction ci-dessous)
+            
+            # Pour l'instant, faisons-le de manière simple. On va le passer
+            # au constructeur de RadarData.
+            
+            # La décimation se fait sur l'axe des traces (axis=1)
+            # data[:, ::factor] prend toutes les lignes, et une colonne sur 'factor'
+            factor = self.decimation_factor # On va ajouter cet attribut
+            if factor > 1:
+                print(f"Application de la décimation avec un facteur de {factor}")
+                return data[:, ::factor]
+            else:
+                return data
+        else:
+            return None
+
     class Header():
         """
             Infos générique du fichier (.rad, dxt, ou en-tête)
@@ -2107,14 +2183,38 @@ class RadarData():
                 self._read_gssi_header(file)
 
         def _read_gssi_header(self, file: Path):
-            self.hdr = dzt.readgssi(infile=file, zero=[0])[0]
-            self.value_trace = self.hdr['shape'][1]
-            self.value_sample = self.hdr['shape'][0]
-            self.value_dist_total = self.value_trace / self.hdr['dzt_spm']
-            self.value_time = self.hdr['rhf_range']
-            self.value_step = self.hdr['dzt_spm']
-            self.value_step_time_acq = self.hdr['dzt_sps']
-            self.value_antenna = self.hdr['rh_antname'][0]
+                    """Lit les champs essentiels d'un en-tête GSSI .dzt."""
+                    print(f"Lecture de l'en-tête GSSI pour {file.name}...")
+                    try:
+                        with open(file, 'rb') as f:
+                            f.seek(4)
+                            self.value_sample = struct.unpack('<h', f.read(2))[0]
+                            f.seek(14)
+                            spm = struct.unpack('<f', f.read(4))[0] # *2 pour le flex
+                            f.seek(26)
+                            self.value_time = struct.unpack('<f', f.read(4))[0]
+
+                            f.seek(0, 2)
+                            total_file_size = f.tell()
+                            header_size = 32768  # The size of the GSSI header in bytes
+
+                            # Subtract the header size to get the size of the actual data
+                            data_size = total_file_size - header_size
+                            
+                            bytes_per_sample = 4 # for int32
+                            trace_size_in_bytes = self.value_sample * bytes_per_sample
+                            
+                            if trace_size_in_bytes > 0:
+                                self.value_trace = int(data_size / trace_size_in_bytes)
+                            else:
+                                self.value_trace = 0
+
+                            self.value_dist_total = self.value_trace  / spm if spm > 0 else 0.0
+
+                            f.seek(98)
+                            self.value_antenna = f.read(14).decode('utf-8', errors='ignore').split('\x00')[0]
+                    except Exception as e:
+                        print(f"Erreur critique lors de la lecture de l'en-tête GSSI : {e}")
 
 class Traitement():
     """
@@ -2452,32 +2552,6 @@ class Traitement():
         # ::-1 -> prend toutes les colonnes (les traces) mais avec un pas de -1,
         # ce qui inverse leur ordre.
         self.data = self.data[:, ::-1]
-
-    def apply_kirchhoff_migration(self, dx: float, dt: float, v: float, aperture_m: float):
-        """
-        Applique la migration de Kirchhoff aux données.
-        """
-        print("Début de la migration de Kirchhoff...")
-        nt, nx = self.data.shape
-
-        if nt == 0 or dx == 0 or dt == 0 or v == 0:
-            print("Erreur: Paramètres de migration invalides.")
-            return
-            
-        aperture_traces = int(aperture_m / dx)
-        migrated_data = np.zeros_like(self.data, dtype=np.float64)
-        data_float = self.data.astype(np.float64)
-
-        print(f"AVANT migration: min={np.min(data_float):.2f}, max={np.max(data_float):.2f}")
-
-        # Appel à la fonction Numba, en passant self.y_offset
-        migrated_data = _kirchhoff_migration_loop(
-            data_float, migrated_data, nt, nx, dt, dx, v, aperture_traces, self.y_offset
-        )
-        
-        print(f"APRÈS migration: min={np.min(migrated_data):.2f}, max={np.max(migrated_data):.2f}")
-        self.data = migrated_data.astype(self.data.dtype)
-        print("Migration terminée.")
 
 class Graphique():
     def __init__(self, ax : plt.Axes, fig : Figure):

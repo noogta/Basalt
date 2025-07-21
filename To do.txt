@@ -1,25 +1,23 @@
 EN COURS 
-    Kirchoff : J'ai que des zérooooo Plus maintenant mais j'ai n'imp
-    Découpage fichier flex : Ok mais fonctionne pas après les set de Y0 et yLim
+    Découpage fichier flex : Ok mais fonctionne pas après les set de Y0 et yLim : Idée bloquer yLim ? -- En test
     Se passer de read gssi
-    Déconvolution 
-    AGC
-
+    Déconvolution : Je capte pas les paramètres 
+    
 IMPORTANT
-    Afficher % valeur
+    Afficher un stack de radargramme (ouvre 1 affiche en haut, puis si tu ouvres le 2, le 1 passe en bas et le 2 est ouvert en haut)
+    3D (avant ça hilbert et migration)
     
 A VOIR
     Arrière plan export
 
 DANS LONGTEMPS
     Dessiner des points, interfaces et rectangles
-    3D (avant ça hilbert et migration)
     Passer en web ?
-    Afficher un stack de radargramme (ouvre 1 affiche en haut, puis si tu ouvres le 2, le 1 passe en bas et le 2 est ouvert en haut)
     Fusionner canal 1 et 2 du flex (décallage 10 cm en x)  / Bi freq 
-    Save 
 
 FAIT
+    Save 
+    Afficher % valeur
     Gain AGC, normalization, décroissance de l'énergie
     Export par tranche
     Inversement trace
@@ -35,3 +33,5 @@ FAIT
     T0 auto : Attention avec le flex
     Fusionner les deux vois flex
 
+ABANDON
+    Kirchoff 
