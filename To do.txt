@@ -1,21 +1,31 @@
 EN COURS 
-    Découpage fichier flex : Ok mais fonctionne pas après les set de Y0 et yLim : Idée bloquer yLim ? -- En test
-    Se passer de read gssi
     Déconvolution : Je capte pas les paramètres 
+    Version simplifiée
     
 IMPORTANT
     Afficher un stack de radargramme (ouvre 1 affiche en haut, puis si tu ouvres le 2, le 1 passe en bas et le 2 est ouvert en haut)
     3D (avant ça hilbert et migration)
+    Dessiner des points, interfaces et rectangles
+    Ajouter SEGY en format de fichier
+    Barre de chargement
     
 A VOIR
     Arrière plan export
+    Profondeur en cm 
 
 DANS LONGTEMPS
-    Dessiner des points, interfaces et rectangles
     Passer en web ?
     Fusionner canal 1 et 2 du flex (décallage 10 cm en x)  / Bi freq 
 
+BUG NOTE
+    Y auto sur le chanel 2 flex : Good remplacement de la fonction def detect_t0(self):
+    Inversion pas prise en compte dans l'export par tranche --> Traité
+    Xlim comportement pas ok
+    
+
 FAIT
+    Découpage fichier flex
+    Se passer de read gssi
     Save 
     Afficher % valeur
     Gain AGC, normalization, décroissance de l'énergie

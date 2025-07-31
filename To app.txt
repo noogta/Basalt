@@ -1,0 +1,3 @@
+pyinstaller --windowed --onefile --name="Basalt" --icon="/Users/benjaminferret/Documents/Basalt/icon.icns" Basalt.py
+
+pyinstaller --windowed --onefile --name="Basalt" Basalt.py

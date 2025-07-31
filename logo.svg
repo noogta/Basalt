@@ -1,0 +1,50 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 <svg width="340" height="125" viewBox="0 0 340 125" xmlns="http://www.w3.org/2000/svg">\
+  <!-- Style de la police int\'e9gr\'e9 pour une meilleure compatibilit\'e9 -->\
+  <style>\
+    .logo-title \{\
+      font-family: 'Poppins', sans-serif;\
+      font-weight: 600;\
+      font-size: 72px;\
+      letter-spacing: 1px;\
+      fill: #0077D1;\
+    \}\
+  </style>\
+  \
+  <!-- B -->\
+  <text x="0" y="75" class="logo-title">B</text>\
+  \
+  <!-- A stylis\'e9 avec appareil GPR -->\
+  <g transform="translate(45, 5)">\
+    <!-- Pieds du A -->\
+    <line x1="10" y1="70" x2="35" y2="20" stroke="#0077D1" stroke-width="8" stroke-linecap="round"/>\
+    <line x1="60" y1="70" x2="35" y2="20" stroke="#0077D1" stroke-width="8" stroke-linecap="round"/>\
+    <!-- Ligne de surface -->\
+    <line x1="0" y1="55" x2="70" y2="55" stroke="#0077D1" stroke-width="4" stroke-linecap="round"/>\
+    \
+    <!-- Appareil GPR en orange -->\
+    <g fill="#FD7E14">\
+      <rect x="22" y="61" width="26" height="4"/>\
+      <circle cx="22" cy="65" r="4"/>\
+      <circle cx="48" cy="65" r="4"/>\
+      <line x1="18" y1="48" x2="28" y2="61" stroke="#FD7E14" stroke-width="3" stroke-linecap="round"/>\
+      <line x1="12" y1="48" x2="18" y2="48" stroke="#FD7E14" stroke-width="3" stroke-linecap="round"/>\
+    </g>\
+  </g>\
+  \
+  <!-- S A L T -->\
+  <text x="120" y="75" class="logo-title">SALT</text>\
+\
+  <!-- Onde simplifi\'e9e -->\
+  <g fill="none" stroke-linecap="round">\
+    <!-- Arc principal -->\
+    <path d="M 130 90 Q 220 118 305 90" stroke="#FD7E14" stroke-width="3"/>\
+  </g>\
+</svg>\
+}

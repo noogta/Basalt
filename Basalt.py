@@ -87,7 +87,6 @@ class TraitementValues:
     interpolation_mode: str = 'nearest'
 
     decimation_factor: int = 1
-    
  
 class Const():
     def __init__(self):
@@ -144,6 +143,7 @@ class MainWindow():
         self.window.setWindowTitle(softwarename)
         
         self.basalt :Basalt = Basalt()
+        self.is_simplified_mode = False
         self.manual_gain_widgets = []
         self.window.setGeometry(100, 100, 1600, 900)
         settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
@@ -266,6 +266,13 @@ class MainWindow():
         export_sections_action = QAction("Exporter par Sections...", self.window)
         export_sections_action.triggered.connect(self.on_export_by_section_clicked)
         file_menu.addAction(export_sections_action)
+
+        file_menu.addSeparator()
+        mode_menu = menu_bar.addMenu("Mode")
+        self.simplified_mode_action = QAction("Mode Simplifié", self.window)
+        self.simplified_mode_action.setCheckable(True) # Le rend cochable
+        self.simplified_mode_action.triggered.connect(self.on_simplified_mode_toggled)
+        mode_menu.addAction(self.simplified_mode_action)
 
     def init_ui(self):
         #---Liste des fichier
@@ -452,7 +459,7 @@ class MainWindow():
 
         # Création et ajout de la première page (Paramètres de Gain)
         self.gain_page = self.create_gain_page()
-        self.tab_widget.addTab(self.gain_page, "Paramètres de Gain")
+        self.tab_widget.addTab(self.gain_page, "Gains")
 
         # Création et ajout de la  page (Filtres)
         self.filter_page = self.create_filter_page()
@@ -483,6 +490,52 @@ class MainWindow():
         #----------------------------
         # Ajoutez un espaceur pour pousser les éléments vers le haut si nécessaire
         self.control_layout.addStretch()
+
+
+    def on_simplified_mode_toggled(self, checked: bool):
+        """Gère le changement d'état du mode simplifié."""
+        print(f"Mode simplifié {'activé' if checked else 'désactivé'}.")
+        self.is_simplified_mode = checked
+        self.basalt.is_simplified_mode = checked
+        
+        # Met à jour l'interface pour cacher/montrer les contrôles
+        self._update_ui_for_mode()
+        
+        # Relance un traitement complet pour appliquer le nouveau mode
+        self.update_display()
+
+    def _update_ui_for_mode(self):
+        """Active ou désactive les widgets avancés en fonction du mode."""
+        is_simplified = self.is_simplified_mode
+        
+        # On rend les widgets avancés INVISIBLES en mode simplifié
+        # C'est plus propre que de juste les désactiver.
+        
+        # 1. Gains manuels
+        self.manual_gain_container.setVisible(not is_simplified)
+        self.label_auto_gain.setVisible(not is_simplified)
+        # trace moyenne
+        self.combo_sub_mean_mode.setVisible(not is_simplified)
+        self.globale_options_widget.setVisible(not is_simplified)
+        self.label_mode.setVisible(not is_simplified)
+        self.label_submean.setVisible(not is_simplified)
+        # 2. Filtre fréquentiel et Déconvolution (qui sont dans la page "Filtres")
+        self.freq_filter_container.setVisible(not is_simplified)
+
+        # On cherche le QGroupBox de la déconvolution pour le cacher
+        deconv_groupbox = self.btn_apply_deconv.parent()
+        if isinstance(deconv_groupbox, QGroupBox):
+            deconv_groupbox.setVisible(not is_simplified)
+        
+        # interpolation 
+        self.interpolation_container.setVisible(not is_simplified)
+
+        #Decimate
+        self.decimation_container.setVisible(not is_simplified)
+
+        # IMPORTANT: On met à jour l'état des gains auto/manuels
+        # pour s'assurer que tout est cohérent.
+        self._update_gain_controls_state()
 
     def redraw_plot(self):
         """
@@ -537,10 +590,11 @@ class MainWindow():
         gain_widget = QWidget()
         gain_layout = QVBoxLayout(gain_widget)
 
-        # --- Section des Gains Manuels ---
-        label_manual_gain = QLabel("--- Gains Manuels ---")
-        label_manual_gain.setStyleSheet("font-weight: bold;")
-        gain_layout.addWidget(label_manual_gain)
+        self.manual_gain_container = QWidget()
+        manual_gain_layout = QVBoxLayout(self.manual_gain_container)
+        manual_gain_layout.setContentsMargins(0, 0, 0, 0) # Pour un alignement parfait
+
+
 
         # --- Gains Manuels ---
         self.manual_gain_widgets = []
@@ -566,30 +620,51 @@ class MainWindow():
             ("t_max_exp:", self.line_edit_t_max_exp, "Fin du gain expo (sample)")
         ]
 
-        # La boucle crée maintenant l'interface à partir de la config
+        # # La boucle crée maintenant l'interface à partir de la config
+        # for label_text, line_edit, placeholder in manual_gain_config:
+        #     # Si c'est un sous-titre (pas d'objet QLineEdit associé)
+        #     if line_edit is None:
+        #         label = QLabel(label_text)
+        #         label.setStyleSheet("font-style: italic; font-size: 11pt; margin-top: 2px;")
+        #         gain_layout.addWidget(label)
+        #     # Sinon, c'est un champ de saisie normal
+        #     else:
+        #         h_layout = QHBoxLayout()
+        #         h_layout.addWidget(QLabel(label_text))
+        #         line_edit.setPlaceholderText(placeholder)
+        #         line_edit.setValidator(self.float_validator)
+        #         h_layout.addWidget(line_edit)
+        #         gain_layout.addLayout(h_layout)
+        #         self.manual_gain_widgets.append(line_edit) # On ajoute à la liste pour le contrôle
+
+        # --- Section des Gains Manuels ---
+        label_manual_gain = QLabel("--- Gains Manuels ---")
+        label_manual_gain.setStyleSheet("font-weight: bold;")
+        manual_gain_layout.addWidget(label_manual_gain)
+
         for label_text, line_edit, placeholder in manual_gain_config:
-            # Si c'est un sous-titre (pas d'objet QLineEdit associé)
-            if line_edit is None:
+            if line_edit is None: # Si c'est un sous-titre
                 label = QLabel(label_text)
                 label.setStyleSheet("font-style: italic; font-size: 11pt; margin-top: 2px;")
-                gain_layout.addWidget(label)
-            # Sinon, c'est un champ de saisie normal
-            else:
+                manual_gain_layout.addWidget(label) # Ajout au layout du conteneur
+            else: # Sinon, c'est un champ de saisie
                 h_layout = QHBoxLayout()
                 h_layout.addWidget(QLabel(label_text))
                 line_edit.setPlaceholderText(placeholder)
                 line_edit.setValidator(self.float_validator)
                 h_layout.addWidget(line_edit)
-                gain_layout.addLayout(h_layout)
-                self.manual_gain_widgets.append(line_edit) # On ajoute à la liste pour le contrôle
+                manual_gain_layout.addLayout(h_layout) # Ajout au layout du conteneur
+                self.manual_gain_widgets.append(line_edit)
 
+        # 3. On ajoute le conteneur UNIQUE au layout principal de la page
+        gain_layout.addWidget(self.manual_gain_container)
         #gain_layout.addSpacing(15)
 
 
         # --- Section des Gains Automatiques ---
-        label_auto_gain = QLabel("--- Gains Automatiques ---")
-        label_auto_gain.setStyleSheet("font-weight: bold; margin-top: 15px;")
-        gain_layout.addWidget(label_auto_gain)
+        self.label_auto_gain = QLabel("--- Gains Automatiques ---")
+        self.label_auto_gain.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        gain_layout.addWidget(self.label_auto_gain)
 
         # Création des widgets de gain automatique
         self.checkbox_agc = QCheckBox("Gain automatique (AGC)")
@@ -646,9 +721,9 @@ class MainWindow():
         filter_layout.addLayout(dewow_layout)
 
         # --- Retrait de la Trace Moyenne ---
-        label_submean = QLabel("--- Retrait de la Trace Moyenne ---")
-        label_submean.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        filter_layout.addWidget(label_submean)
+        self.label_submean = QLabel("--- Retrait de la Trace Moyenne ---")
+        self.label_submean.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        filter_layout.addWidget(self.label_submean)
 
         self.checkbox_sub_mean = QCheckBox("Activer le retrait de trace moyenne")
         filter_layout.addWidget(self.checkbox_sub_mean)
@@ -674,7 +749,8 @@ class MainWindow():
         globale_layout.addWidget(self.line_edit_trim_percent)
 
         # On ajoute le choix du mode et les deux widgets d'options au layout
-        sub_mean_options_layout.addWidget(QLabel("Mode :"))
+        self.label_mode = QLabel("Mode :")
+        sub_mean_options_layout.addWidget(self.label_mode)
         self.combo_sub_mean_mode = QComboBox()
         self.combo_sub_mean_mode.addItems(["Globale", "Mobile"])
         sub_mean_options_layout.addWidget(self.combo_sub_mean_mode)
@@ -697,35 +773,43 @@ class MainWindow():
         self.line_edit_sub_mean_window.editingFinished.connect(self.on_sub_mean_window_edited)
         self.line_edit_trim_percent.editingFinished.connect(self.on_trim_percent_edited) # <-- Nouvelle connexion
 
-        # Filtre Fréquentiel (Passe-Haut / Passe-Bas)
+        # --- Filtre Fréquentiel (dans un conteneur) ---
+        
+        # 1. On crée un widget qui servira de conteneur pour toute la section
+        self.freq_filter_container = QWidget()
+        container_layout = QVBoxLayout(self.freq_filter_container)
+        container_layout.setContentsMargins(0, 0, 0, 0) # Pour éviter les marges inutiles
+
+        # Le reste de votre code est identique, mais on ajoute les éléments au 'container_layout'
         label_freq_filter = QLabel("--- Filtre fréquentiel ---")
         label_freq_filter.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        filter_layout.addWidget(label_freq_filter)
+        container_layout.addWidget(label_freq_filter)
         
         self.checkbox_filtre_freq = QCheckBox("Activer le filtre fréquentiel")
-        self.checkbox_filtre_freq.setChecked(False) # Le filtre est désactivé par défaut
-        filter_layout.addWidget(self.checkbox_filtre_freq)
-        
-        # On connecte le changement d'état à une nouvelle fonction
+        self.checkbox_filtre_freq.setChecked(False)
         self.checkbox_filtre_freq.stateChanged.connect(self.on_filtre_freq_changed)
+        container_layout.addWidget(self.checkbox_filtre_freq)
 
         freq_filtre_layout = QHBoxLayout()
         freq_filtre_layout.addWidget(QLabel("Sampling freq:"))
         self.line_edit_freq_filtre = QLineEdit()
         self.line_edit_freq_filtre.setPlaceholderText("Fréquence d'acquisition")
         self.line_edit_freq_filtre.setValidator(self.float_validator)
-        freq_filtre_layout.addWidget(self.line_edit_freq_filtre)
         self.line_edit_freq_filtre.editingFinished.connect(self.on_freq_filtre_edited)
-        filter_layout.addLayout(freq_filtre_layout)
+        freq_filtre_layout.addWidget(self.line_edit_freq_filtre)
+        container_layout.addLayout(freq_filtre_layout)
 
         antenna_freq_layout = QHBoxLayout()
-        antenna_freq_layout.addWidget(QLabel("Antenna freq"))
+        antenna_freq_layout.addWidget(QLabel("Antenna freq (MHz):"))
         self.line_edit_antenna_freq = QLineEdit()
         self.line_edit_antenna_freq.setPlaceholderText("Fréquence de l'antenne")
         self.line_edit_antenna_freq.setValidator(self.float_validator)
-        antenna_freq_layout.addWidget(self.line_edit_antenna_freq)
         self.line_edit_antenna_freq.editingFinished.connect(self.on_cuttoff_freq_edited)
-        filter_layout.addLayout(antenna_freq_layout)
+        antenna_freq_layout.addWidget(self.line_edit_antenna_freq)
+        container_layout.addLayout(antenna_freq_layout)
+
+        # 2. On ajoute le conteneur UNIQUE au layout principal de la page "Filtres"
+        filter_layout.addWidget(self.freq_filter_container)
 
         filter_layout.addStretch() # Pousse les éléments vers le haut
 
@@ -847,10 +931,17 @@ class MainWindow():
         options_layout.addStretch() # Pousse tout vers le haut
 
 
-        # --- Section pour la Qualité d'Affichage ---
+        # --- Section pour la Qualité d'Affichage (dans un conteneur) ---
+
+        # 1. On crée le widget conteneur
+        self.interpolation_container = QWidget()
+        container_layout = QVBoxLayout(self.interpolation_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 2. On ajoute les éléments existants au layout du conteneur
         label_interpolation = QLabel("--- Qualité d'Affichage (Interpolation) ---")
         label_interpolation.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        options_layout.addWidget(label_interpolation)
+        container_layout.addWidget(label_interpolation)
 
         interpolation_layout = QHBoxLayout()
         interpolation_layout.addWidget(QLabel("Méthode :"))
@@ -858,31 +949,41 @@ class MainWindow():
         interpolation_options = ['nearest', 'bilinear', 'bicubic', 'lanczos', 'spline16']
         self.combo_interpolation.addItems(interpolation_options)
         interpolation_layout.addWidget(self.combo_interpolation)
-        options_layout.addLayout(interpolation_layout)
-        # -----------------
+        container_layout.addLayout(interpolation_layout)
+
+        # 3. On ajoute le conteneur entier au layout principal de la page "Options"
+        options_layout.addWidget(self.interpolation_container)
 
 
+        # --- Section Réduction des Données (dans un conteneur) ---
+
+        # 1. On crée le widget conteneur
+        self.decimation_container = QWidget()
+        container_layout = QVBoxLayout(self.decimation_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 2. On ajoute les éléments existants au layout du conteneur
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        options_layout.addWidget(line)
+        container_layout.addWidget(line)
 
         label_decimation = QLabel("--- Réduction des Données (Décimation) ---")
         label_decimation.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        options_layout.addWidget(label_decimation)
+        container_layout.addWidget(label_decimation)
 
         decimation_layout = QHBoxLayout()
         decimation_layout.addWidget(QLabel("Garder 1 trace sur :"))
         
         self.line_edit_decimation = QLineEdit(str(self.basalt.traitementValues.decimation_factor))
-        # On utilise un validateur d'entiers, de 1 à 100 par exemple
         self.line_edit_decimation.setValidator(QIntValidator(1, 100)) 
         self.line_edit_decimation.setToolTip("Ex: 2 pour garder une trace sur deux. 1 pour tout garder.")
-        decimation_layout.addWidget(self.line_edit_decimation)
-        options_layout.addLayout(decimation_layout)
-
-        # On connecte le signal
         self.line_edit_decimation.editingFinished.connect(self.on_decimation_edited)
+        decimation_layout.addWidget(self.line_edit_decimation)
+        container_layout.addLayout(decimation_layout)
+
+        # 3. On ajoute le conteneur entier au layout principal de la page "Options"
+        options_layout.addWidget(self.decimation_container)
 
         return options_widget
 
@@ -902,62 +1003,82 @@ class MainWindow():
 
     def on_export_by_section_clicked(self):
         """
-        Exporte le radargramme actuel en plusieurs fichiers PNG de longueur définie.
+        Exporte le radargramme actuel en plusieurs fichiers PNG de longueur définie,
+        en appliquant tous les traitements actifs et en gérant l'inversion des traces.
         """
+        # --- ÉTAPE 1 : Vérifications initiales ---
         if self.basalt.traitement is None or self.basalt.data is None:
             QMessageBox.warning(self.window, "Exportation impossible", "Aucun radargramme n'est chargé et traité.")
             return
 
-        # 1. Demander la longueur de la section
+        # --- ÉTAPE 2 : Obtenir les paramètres de l'utilisateur ---
         section_length, ok = QInputDialog.getDouble(self.window, "Longueur de Section", 
                                                     "Entrez la longueur de chaque section (en mètres):", 
                                                     20.0, 0.1, 10000.0, 1)
-        if not ok or section_length <= 0: return
+        if not ok or section_length <= 0:
+            print("Export par section annulé.")
+            return
 
-        # 2. Demander le dossier de destination
         output_folder = QFileDialog.getExistingDirectory(self.window, "Choisir un dossier de destination")
-        if not output_folder: return
+        if not output_folder:
+            print("Export par section annulé.")
+            return
 
         print(f"Début de l'export par sections de {section_length} m...")
 
-        # --- DÉBUT DE LA LOGIQUE CORRIGÉE ---
-
-        # 3. Sauvegarder les limites X actuelles directement depuis le modèle de données
+        # --- ÉTAPE 3 : Préparation des variables ---
+        # Sauvegarde des limites X actuelles pour les restaurer à la fin
         original_x0 = self.basalt.traitementValues.X0
         original_xlim = self.basalt.traitementValues.X_lim
 
-        # 4. Calculer les paramètres de conversion
+        # Calcul des paramètres de conversion
         header = self.basalt.data.header
         distance_totale = self.basalt.traitementValues.X_dist if self.basalt.traitementValues.X_dist else header.value_dist_total
         
         if header.value_trace == 0:
             print("Erreur : Nombre de traces nul, impossible de calculer la distance par trace.")
+            QMessageBox.critical(self.window, "Erreur", "Le nombre de traces du fichier est nul.")
             return
+            
         m_par_trace = distance_totale / header.value_trace
-        
         num_sections = math.ceil(distance_totale / section_length)
         base_filename = self.basalt.selectedFile.stem
 
-        # 5. Boucler pour créer chaque image
+        # Détermination si le profil doit être lu en sens inverse
+        mode = self.basalt.traitementValues.profile_direction_mode
+        should_mirror = (mode == 'mirror_all') or \
+                        (mode == 'mirror_serpentine' and self.basalt.current_file_index % 2 == 1)
+
+        # --- ÉTAPE 4 : Boucle d'exportation ---
         for i in range(num_sections):
+            # a) Calcul des limites de la section dans le sens de lecture (0 -> fin)
             start_m = i * section_length
             end_m = min((i + 1) * section_length, distance_totale)
             
-            print(f"Export de la section {i+1}/{num_sections} : de {start_m:.2f} m à {end_m:.2f} m")
+            # b) Détermination des tranches à extraire du fichier SOURCE
+            if should_mirror:
+                start_m_original = distance_totale - end_m
+                end_m_original = distance_totale - start_m
+                print(f"Export de la section {i+1} (inversée) : de {start_m_original:.2f} m à {end_m_original:.2f} m de l'original")
+            else:
+                start_m_original = start_m
+                end_m_original = end_m
+                print(f"Export de la section {i+1} : de {start_m_original:.2f} m à {end_m_original:.2f} m")
 
-            # a. Convertir les distances en indices de trace
-            start_trace_idx = int(round(start_m / m_par_trace))
-            end_trace_idx = int(round(end_m / m_par_trace))
+            # c) Conversion en indices de trace
+            start_trace_idx = int(round(start_m_original / m_par_trace))
+            end_trace_idx = int(round(end_m_original / m_par_trace))
             
-            # b. Mettre à jour le modèle de données DIRECTEMENT
+            # d) Mise à jour du modèle de données avec les nouvelles limites
             self.basalt.traitementValues.X0 = start_trace_idx
             self.basalt.traitementValues.X_lim = end_trace_idx
             
-            # c. Forcer la mise à jour complète (traitement + affichage)
+            # e) Lancement du traitement complet sur cette tranche
+            # C'est ici que TOUS les traitements (gain, filtres, miroir) sont appliqués
             self.update_display()
-            QApplication.processEvents() # Laisser le temps à l'UI de se redessiner
+            QApplication.processEvents() # Laisse le temps à l'UI de se redessiner
 
-            # d. Sauvegarder le graphique
+            # f) Sauvegarde de l'image résultante
             output_filename = os.path.join(output_folder, f"{base_filename}_section_{i+1:02d}_{start_m:.1f}-{end_m:.1f}m.png")
             try:
                 self.fig.savefig(output_filename, dpi=300)
@@ -965,11 +1086,11 @@ class MainWindow():
             except Exception as e:
                 print(f" -> ERREUR lors de la sauvegarde : {e}")
 
-        # 6. Restaurer les limites initiales dans le modèle de données
+        # --- ÉTAPE 5 : Restauration de l'état initial ---
         print("Restauration des limites d'affichage initiales.")
         self.basalt.traitementValues.X0 = original_x0
         self.basalt.traitementValues.X_lim = original_xlim
-        self.update_display() # Rafraîchir une dernière fois pour revenir à la vue d'origine
+        self.update_display()
         
         QMessageBox.information(self.window, "Exportation terminée", f"{num_sections} sections ont été sauvegardées.")
         print("--- Export par sections terminé ! ---")
@@ -1064,14 +1185,6 @@ class MainWindow():
             file_to_process = current_files_in_list[row]
             radar_type = self.constante.getRadarByExtension(file_to_process.suffix)
 
-            # # Si c'est un fichier GSSI Flex, on désactive le champ Y_lim
-            # if radar_type == Radar.GSSI_FLEX:
-            #     self.line_edit_ylim.setEnabled(False)
-            #     # On vide le champ pour éviter toute confusion
-            #     self.line_edit_ylim.clear()
-            # # Sinon, pour tous les autres types de fichiers, on s'assure qu'il est activé
-            # else:
-            #     self.line_edit_ylim.setEnabled(True)       
             print(f"Fichier correspondant trouvé par index ({row}) : {file_to_process.name}")
             
             # 4. On charge le fichier en passant son index pour le mode serpentin
@@ -1249,11 +1362,18 @@ class MainWindow():
     def on_sub_mean_toggled(self, state):
         is_checked = (state == Qt.CheckState.Checked.value)
         self.basalt.traitementValues.is_sub_mean = is_checked
-        self.combo_sub_mean_mode.setEnabled(is_checked)
-        
-        # On appelle la logique de visibilité
-        self.on_sub_mean_mode_changed(0) # 0 pour forcer la mise à jour de la visibilité
-        
+
+        if self.is_simplified_mode and is_checked:
+            # En mode simplifié, on force les paramètres par défaut
+            print("Mode simplifié : application du retrait de trace 'Globale' avec 5% d'élagage.")
+            self.basalt.traitementValues.sub_mean_mode = 'Globale'
+            self.basalt.traitementValues.sub_mean_trim_percent = 5.0
+        else:
+            # En mode avancé, on active/désactive les contrôles détaillés
+            self.combo_sub_mean_mode.setEnabled(is_checked)
+            self.on_sub_mean_mode_changed(0) # Met à jour la visibilité des options
+            
+            
         self.update_display()
 
     def on_sub_mean_mode_changed(self, index):
@@ -1846,62 +1966,33 @@ class Basalt():
         return cropped_data
 
     def detect_t0(self):
-        """
-        Détecte l'échantillon du pic de la première arrivée avec une zone de recherche contrôlée.
-        """
+        """Détecte T0 sur le canal actuellement sélectionné et retourne sa valeur RELATIVE."""
         if self.data is None:
             return 0
 
-        raw_data = self.data.dataFile
-        t0_offset = 0
-
-        if self.antenna == Radar.GSSI_FLEX:
-            print("Cas GSSI Flex détecté. Analyse du canal sélectionné.")
-            data_to_analyze = self._getFlexData(raw_data)
-            if not self.boolFlex:
-                t0_offset = raw_data.shape[0] // 2
-        else:
-            data_to_analyze = raw_data.copy()
+        # 1. On récupère d'abord le tableau de données du bon canal
+        data_to_analyze = self._getDataTraité(self.data.dataFile)
 
         if data_to_analyze.size == 0:
             return 0
-
-        # --- DÉBUT DE LA NOUVELLE LOGIQUE DE RECHERCHE ---
-
-        # 1. Définir les limites de la recherche
-        start_sample = 10  # On ignore toujours le tout premier échantillon
         
-        # Par défaut, on cherche jusqu'à la fin du tableau analysé
-        end_sample = data_to_analyze.shape[0] 
+        # 2. On effectue la recherche sur ce tableau déjà isolé
+        start_sample = 10 
+        end_sample = data_to_analyze.shape[0]
         
-        # Règle spécifique pour les GSSI Flex : on ne dépasse pas l'échantillon 1022
-        if self.antenna == Radar.GSSI_FLEX:
-            end_sample = 1022
-            print(f"Zone de recherche pour Flex limitée à [{start_sample}, {end_sample}]")
-
-        # On s'assure que la zone de recherche est valide
         if start_sample >= end_sample:
-            print("Avertissement : Zone de recherche invalide. Retour à 0.")
             return 0
 
-        # 2. Le calcul se fait sur le tableau complet, mais la recherche est limitée
         abs_data = np.abs(data_to_analyze.astype(np.float32))
         mean_energy_trace = np.mean(abs_data, axis=1)
         
-        # 3. On applique argmax UNIQUEMENT sur la tranche qui nous intéresse
-        # L'indice retourné sera RELATIF au début de cette tranche (c'est-à-dire à start_sample)
         relative_index = np.argmax(mean_energy_trace[start_sample:end_sample])
         
-        # 4. On calcule l'index local en ajoutant le point de départ de la recherche
-        local_t0_sample = relative_index + start_sample
+        # Le résultat est déjà la position relative dans le canal, c'est ce qu'il nous faut
+        t0_sample = relative_index + start_sample
         
-        # --- FIN DE LA NOUVELLE LOGIQUE ---
-
-        # 5. On calcule l'indice absolu en ajoutant l'offset du canal (pour Flex)
-        absolute_t0_sample = local_t0_sample + t0_offset
-        
-        print(f"T0 automatiquement détecté à l'échantillon absolu : {absolute_t0_sample}")
-        return absolute_t0_sample
+        print(f"T0 automatiquement détecté à l'échantillon RELATIF : {t0_sample}")
+        return t0_sample
 
     def get_plot_axes_parameters(self):
         """
