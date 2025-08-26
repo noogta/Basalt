@@ -90,7 +90,7 @@ class TraitementValues:
  
 class Const():
     def __init__(self):
-        self.ext_list = [".rd7", ".rd3", ".DZT",".dzt"]
+        self.ext_list = [".rd7", ".rd3", ".DZT",".dzt", ".DZT (Multi-Canal)"]
         self.freq_state = ["Filtrage désactivé", "Haute Fréquence", "Basse Fréquence"]
         
         self.Xunit = ["Distance", "Temps", "Traces"]
@@ -106,7 +106,7 @@ class Const():
                 return Radar.MALA
             case ".DZT":
                 return Radar.GSSI_XT
-            case ".dzt":
+            case ".dzt" | ".DZT (Multi-Canal)":
                 return Radar.GSSI_FLEX
     def getFiltreFreq(self, freq: str):
         match freq:
@@ -119,7 +119,12 @@ class Const():
                 return None
                 
     def getFiltreExtension(self,ext:str):
-        return "*" + ext
+        if ext == ".DZT (Multi-Canal)":
+            # ... on lui dit de chercher les fichiers qui se terminent réellement par .DZT
+            return "*.DZT"
+        else:
+            # Pour tous les autres cas, on garde le comportement normal.
+            return "*" + ext
 
 class AcceptEmptyDoubleValidator(QDoubleValidator):
     def validate(self, input_str: str, pos: int) -> tuple['QValidator.State', str, int]:
@@ -991,9 +996,20 @@ class MainWindow():
         """Remplit le QListWidget avec les noms de fichiers, triés numériquement."""
         self.listFile_widget.clear()
 
-        # On fait un seul appel à notre nouvelle fonction intelligente
+        selected_option = self.combo_box_extension.currentText()
+        
+        # On détermine la véritable extension de fichier à rechercher
+        if selected_option == ".DZT (Multi-Canal)":
+            actual_extension = ".DZT"
+        else:
+            actual_extension = selected_option
+            
+        # On utilise cette extension corrigée pour la recherche de fichiers
+        extension_filter = self.constante.getFiltreExtension(actual_extension)
+        
+        # Le reste de la fonction est inchangé, mais utilise le nouveau filtre
         sorted_files = self.basalt.getFilesFiltered(
-            extension_filter=self.constante.getFiltreExtension(self.combo_box_extension.currentText()),
+            extension_filter=extension_filter,
             freq_key=self.constante.getFiltreFreq(self.combo_box_frequence.currentText())
         )
         
@@ -1106,7 +1122,7 @@ class MainWindow():
         self.combo_box_frequence.clear()
 
         # Si l'utilisateur a choisi un fichier GSSI Flex (.dzt)
-        if extension_text == ".dzt":
+        if extension_text in [".dzt", ".DZT (Multi-Canal)"]:
             # --- MODIFICATION ICI ---
             # AVANT : self.label_combo_2.setText("Canal :")
             # APRÈS :
@@ -1133,7 +1149,7 @@ class MainWindow():
         extension = self.combo_box_extension.currentText()
 
         # Si on est en mode GSSI Flex
-        if extension == '.dzt':
+        if extension in [".dzt", ".DZT (Multi-Canal)"]:
             # On met à jour la variable qui contrôle le canal à afficher
             self.basalt.boolFlex = (selected_text == "Canal 1")
             print(f"Changement de canal GSSI Flex. Affichage du canal {'1' if self.basalt.boolFlex else '2'}.")
@@ -1184,11 +1200,12 @@ class MainWindow():
         if 0 <= row < len(current_files_in_list):
             file_to_process = current_files_in_list[row]
             radar_type = self.constante.getRadarByExtension(file_to_process.suffix)
-
+            if self.combo_box_extension.currentText() == ".DZT (Multi-Canal)":
+                radar_type = Radar.GSSI_FLEX
             print(f"Fichier correspondant trouvé par index ({row}) : {file_to_process.name}")
             
             # 4. On charge le fichier en passant son index pour le mode serpentin
-            self.basalt.setSelectedFile(file_to_process, self.constante.getRadarByExtension(file_to_process.suffix), row)
+            self.basalt.setSelectedFile(file_to_process, radar_type, row)
             
             # 5. On met à jour les champs de l'UI avec les infos du nouveau fichier
             header = self.basalt.data.header
@@ -2120,27 +2137,43 @@ class RadarData():
             rd7 = rd7.transpose()
             data = rd7
         
-        elif(self.path.suffix == ".DZT"):
-            # Ouvrir le fichier en mode binaire
-            with open(self.path, mode='rb') as DZTdata:
-                byte_data = DZTdata.read()
-                # DZT est codé 4 octets
-            DZT = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
-            # Reshape de rd7
-            DZT = DZT.reshape(self.header.value_trace, self.header.value_sample)
-            DZT = DZT.transpose()
-            data = DZT
+        elif self.radar in [Radar.GSSI_XT, Radar.GSSI_FLEX]:
+            with open(self.path, 'rb') as f:
+                byte_data = f.read()
+
+            # On saute l'en-tête de 1024 octets de manière fiable
+            dzt_data = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
+            
+            if self.radar == Radar.GSSI_XT:
+                # Cas MONO-CANAL (.DZT standard)
+                reshaped_data = dzt_data.reshape(self.header.value_trace, self.header.value_sample)
+            else: # Cas Radar.GSSI_FLEX (.dzt ou .DZT Multi-Canal)
+                # Cas MULTI-CANAL : le header donne le nb de samples pour 1 canal, on en a 2
+                reshaped_data = dzt_data.reshape(self.header.value_trace, self.header.value_sample * 2)
+
+            data = reshaped_data.transpose()
+            
+        # elif(self.path.suffix == ".DZT"):
+        #     # Ouvrir le fichier en mode binaire
+        #     with open(self.path, mode='rb') as DZTdata:
+        #         byte_data = DZTdata.read()
+        #         # DZT est codé 4 octets
+        #     DZT = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
+        #     # Reshape de rd7
+        #     DZT = DZT.reshape(self.header.value_trace, self.header.value_sample)
+        #     DZT = DZT.transpose()
+        #     data = DZT
         
-        elif(self.path.suffix == ".dzt"): #Flex 
-            # Ouvrir le fichier en mode binaire
-            with open(self.path, mode='rb') as DZTdata:
-                byte_data = DZTdata.read()
-                # DZT est codé 4 octets
-            DZT = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
-            # Reshape de rd7
-            DZT = DZT.reshape(self.header.value_trace, self.header.value_sample *2 )
-            DZT = DZT.transpose()
-            data = DZT         
+        # elif(self.path.suffix == ".dzt"): #Flex 
+        #     # Ouvrir le fichier en mode binaire
+        #     with open(self.path, mode='rb') as DZTdata:
+        #         byte_data = DZTdata.read()
+        #         # DZT est codé 4 octets
+        #     DZT = np.frombuffer(byte_data, dtype=np.int32)[(2**15):,]
+        #     # Reshape de rd7
+        #     DZT = DZT.reshape(self.header.value_trace, self.header.value_sample *2 )
+        #     DZT = DZT.transpose()
+        #     data = DZT         
             # À supprimer
             #README
             # Si vous souhaitez rajouter d'autres format:
@@ -2323,10 +2356,7 @@ class RadarData():
                     # --- ÉTAPE 3 : Calculer les valeurs dérivées ---
                     self.value_dist_total = self.value_trace / spm if spm > 0 else 0.0
 
-                    # --- CORRECTION FINALE pour GSSI Flex ---
-                    # if self.radar_type == Radar.GSSI_FLEX:
-                    #     self.value_sample //= 2
-                    #     self.value_time /= 2.0
+
                         
             except Exception as e:
                 print(f"Erreur critique lors de la lecture de l'en-tête GSSI : {e}")
