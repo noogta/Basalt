@@ -3,6 +3,7 @@ import os
 import re
 import math 
 import struct
+import io
 
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -17,6 +18,9 @@ from scipy import signal
 from math import sqrt, floor
 from scipy.ndimage import uniform_filter1d
 from scipy.stats import trim_mean
+from scipy.ndimage import uniform_filter, median_filter, gaussian_filter
+from PIL import Image # Nécessaire pour créer le GIF
+from PyQt6.QtWidgets import QProgressDialog # Pour la barre de chargement
 
 import sys
 from PyQt6.QtCore import Qt, QSettings
@@ -88,6 +92,8 @@ class TraitementValues:
 
     decimation_factor: int = 1
  
+    trace_spacing: float = 10.0 # Distance estimée entre chaque trace en cm pour le slicing
+
 class Const():
     def __init__(self):
         self.ext_list = [".rd7", ".rd3", ".DZT",".dzt", ".DZT (Multi-Canal)"]
@@ -136,7 +142,504 @@ class AcceptEmptyDoubleValidator(QDoubleValidator):
         # Pour tous les autres cas (texte non vide), on utilise le comportement
         # normal du QDoubleValidator parent.
         return super().validate(input_str, pos)
-    
+
+# À AJOUTER APRÈS LA CLASSE Graphique
+
+class CScanWindow(QWidget):
+    """
+    Une nouvelle fenêtre (non-modale) pour afficher la vue en coupe (C-Scan).
+    Cette fenêtre est liée à la fenêtre principale et peut se mettre à jour
+    lorsque les paramètres de traitement changent.
+    """
+    def __init__(self, raw_data_3d: np.ndarray, 
+             profile_distances: list[float], # <<< NOUVEL ARGUMENT
+             basalt_instance: 'Basalt', 
+             main_window_instance: 'MainWindow', 
+             parent=None):
+        super().__init__(parent)
+        
+        # On garde une copie des données BRUTES
+        self.raw_data_3d = raw_data_3d 
+        # On crée une copie qui contiendra les données TRAITÉES
+        self.processed_data_3d = raw_data_3d.copy()
+        self.profile_distances = profile_distances
+        # On garde des références aux objets principaux
+        self.basalt = basalt_instance
+        self.main_window = main_window_instance
+        
+        self.setWindowTitle("Vue en Coupe (C-Scan)")
+        self.setGeometry(150, 150, 800, 600)
+        
+        # --- Interface de cette fenêtre ---
+        layout = QVBoxLayout(self)
+        
+        # Canvas Matplotlib
+        self.fig = Figure(figsize=(8, 6), dpi=100)
+        self.canvas = FigureCanvas(self.fig)
+        self.ax = self.fig.add_subplot(111)
+        layout.addWidget(self.canvas)
+        
+        # Slider de profondeur
+        self.slider_label = QLabel("Slice (Sample): 0")
+        layout.addWidget(self.slider_label)
+        
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        num_samples = self.raw_data_3d.shape[0]
+        self.slider.setRange(0, num_samples - 1)
+        self.slider.valueChanged.connect(self.update_slice_display)
+        layout.addWidget(self.slider)
+
+    # --- Options de lissage ---
+        smoothing_group_box = QGroupBox("Lissage (C-Scan)")
+        smoothing_layout = QVBoxLayout()
+
+        # ComboBox pour le type de lissage
+        self.smoothing_type_combo = QComboBox()
+        self.smoothing_type_combo.addItem("Aucun")
+        self.smoothing_type_combo.addItem("Moyenne")
+        self.smoothing_type_combo.addItem("Médiane")
+        self.smoothing_type_combo.addItem("Gaussien")
+        self.smoothing_type_combo.currentTextChanged.connect(self.run_full_processing)
+        smoothing_layout.addWidget(self.smoothing_type_combo)
+
+        # Slider pour la taille du filtre (kernel)
+        self.smoothing_size_label = QLabel("Taille du filtre (pixels): 1")
+        smoothing_layout.addWidget(self.smoothing_size_label)
+        
+        self.smoothing_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.smoothing_size_slider.setRange(1, 15) # De 1x1 à 15x15
+        self.smoothing_size_slider.setSingleStep(2) # Pas impair pour les filtres
+        self.smoothing_size_slider.setValue(1)
+        self.smoothing_size_slider.valueChanged.connect(self.update_smoothing_size_label)
+        self.smoothing_size_slider.sliderReleased.connect(self.run_full_processing) # Traitement coûteux
+        smoothing_layout.addWidget(self.smoothing_size_slider)
+
+        smoothing_group_box.setLayout(smoothing_layout)
+        layout.addWidget(smoothing_group_box)
+        # --- FIN NOUVEAU BLOC ---
+        # --- AJOUT : Bouton d'export ---
+        self.btn_export = QPushButton("Exporter la vue actuelle (PNG)...")
+        self.btn_export.setToolTip("Sauvegarder l'image affichée dans un fichier.")
+        self.btn_export.clicked.connect(self.export_current_view)
+        layout.addWidget(self.btn_export)
+        # --- FIN DE L'AJOUT ---
+
+        # --- AJOUT : Bouton GIF ---
+        self.btn_gif = QPushButton("Exporter Animation (GIF)...")
+        self.btn_gif.setToolTip("Créer un fichier animé (.gif) parcourant toute la profondeur.")
+        self.btn_gif.clicked.connect(self.export_cscan_gif)
+        layout.addWidget(self.btn_gif)
+        # --------------------------            
+
+        # --- AJOUT : Bouton Planche par Pas ---
+        self.btn_montage_step = QPushButton("Exporter Planche (par pas de profondeur)...")
+        self.btn_montage_step.setToolTip("Générer une planche avec un écart de profondeur défini (ex: tous les 10cm).")
+        self.btn_montage_step.clicked.connect(self.export_cscan_montage_by_step)
+        layout.addWidget(self.btn_montage_step)
+        # --- FIN DE L'AJOUT ---
+
+        # Lancer le premier traitement
+        self.run_full_processing()
+
+    def export_cscan_montage_by_step(self):
+        """
+        Génère une planche contact avec un intervalle de profondeur fixe défini par l'utilisateur.
+        """
+        # 1. Récupération des paramètres physiques pour les calculs
+        if self.main_window.basalt.data:
+            ref_header = self.main_window.basalt.data.header
+            total_time_ns = ref_header.value_time
+        else:
+            QMessageBox.warning(self, "Erreur", "Aucune donnée de référence trouvée.")
+            return
+
+        epsilon = self.basalt.traitementValues.epsilon
+        c_lum_mns = 0.299792458 
+        vitesse = c_lum_mns / np.sqrt(epsilon)
+        max_depth_cm = (total_time_ns * vitesse) / 2.0 * 100
+        total_samples = self.processed_data_3d.shape[0]
+
+        # 2. Demander l'intervalle à l'utilisateur
+        step_cm, ok = QInputDialog.getDouble(self, "Pas de profondeur", 
+                                            f"Profondeur max : {max_depth_cm:.1f} cm.\n"
+                                            "Entrez l'écart souhaité entre chaque vue (en cm) :", 
+                                            10.0, 0.1, max_depth_cm, 1)
+        if not ok: return
+
+        # 3. Calculer les profondeurs et les indices correspondants
+        # On crée une liste de profondeurs de 0 à max par pas de step_cm
+        target_depths = np.arange(0, max_depth_cm, step_cm)
+        
+        if len(target_depths) == 0:
+             QMessageBox.warning(self, "Attention", "L'intervalle est trop grand, aucune image ne peut être générée.")
+             return
+
+        # Conversion profondeur (cm) -> indice (sample)
+        # indice = (profondeur_cm / max_cm) * total_samples
+        indices = (target_depths / max_depth_cm * total_samples).astype(int)
+        
+        # On s'assure de ne pas dépasser les limites
+        indices = indices[indices < total_samples]
+
+        num_plots = len(indices)
+        print(f"Génération d'une planche de {num_plots} images (tous les {step_cm} cm)...")
+
+        # 4. Demander le fichier de sortie
+        start_path = f"CScan_Planche_Pas_{step_cm}cm.png"
+        if self.basalt.folder:
+            start_path = os.path.join(self.basalt.folder, start_path)
+            
+        fileName, _ = QFileDialog.getSaveFileName(self, "Exporter Planche", start_path, "Images PNG (*.png);;Images JPEG (*.jpg)")
+        if not fileName: return
+
+        # 5. Calcul dynamique de la grille (Lignes x Colonnes)
+        # On essaie de faire un carré ou un rectangle équilibré
+        cols = math.ceil(math.sqrt(num_plots))
+        rows = math.ceil(num_plots / cols)
+        
+        # On adapte la taille de l'image finale en fonction du nombre de lignes
+        # Hauteur de base 4 pouces + 2 pouces par ligne supplémentaire
+        fig_height = max(8, 3 * rows) 
+        fig_width = max(12, 4 * cols)
+
+        fig_montage = Figure(figsize=(fig_width, fig_height), dpi=150)
+        clim_min, clim_max = self.main_window.radargramme.getRangePlot()
+
+        try:
+            # 6. Boucle de tracé
+            for i, sample_idx in enumerate(indices):
+                ax = fig_montage.add_subplot(rows, cols, i + 1)
+                
+                # Données
+                slice_data = self.processed_data_3d[sample_idx, :, :]
+                
+                # Lissage
+                smoothing_type = self.smoothing_type_combo.currentText()
+                smoothing_size = self.smoothing_size_slider.value()
+                if smoothing_type != "Aucun" and smoothing_size > 1:
+                    if smoothing_type == "Moyenne":
+                        slice_data = uniform_filter(slice_data, size=smoothing_size)
+                    elif smoothing_type == "Médiane":
+                        slice_data = median_filter(slice_data, size=smoothing_size)
+                    elif smoothing_type == "Gaussien":
+                        slice_data = gaussian_filter(slice_data, sigma=smoothing_size/3.0)
+                
+                # Affichage
+                ax.imshow(slice_data.T, cmap='gray', aspect='auto', vmin=clim_min, vmax=clim_max)
+                
+                # Titre avec la profondeur réelle
+                real_depth = target_depths[i]
+                ax.set_title(f"Z = {real_depth:.1f} cm", fontsize=10, fontweight='bold')
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+            # Titre global
+            fig_montage.suptitle(f"C-Scan (Pas={step_cm}cm, ε={epsilon}) - {self.basalt.selectedFile.parent.name if self.basalt.selectedFile else ''}", fontsize=16)
+            fig_montage.tight_layout(rect=[0, 0.03, 1, 0.97])
+            
+            fig_montage.savefig(fileName, dpi=300)
+            print(f"Planche sauvegardée : {fileName}")
+            QMessageBox.information(self, "Succès", f"Planche de {num_plots} vues générée avec succès.")
+
+        except Exception as e:
+            print(f"Erreur planche : {e}")
+            QMessageBox.critical(self, "Erreur", f"Impossible de créer la planche :\n{e}")
+
+    def export_current_view(self):
+        """Sauvegarde la vue actuelle du C-Scan en image haute résolution."""
+        # 1. Préparer le nom de fichier par défaut
+        slice_index = self.slider.value()
+        default_filename = f"CScan_Slice_{slice_index:03d}.png"
+        
+        # On essaie de pointer vers le dossier de données actuel
+        start_path = ""
+        if self.basalt.folder:
+            start_path = os.path.join(self.basalt.folder, default_filename)
+        else:
+            start_path = default_filename
+
+        # 2. Ouvrir la boîte de dialogue
+        fileName, _ = QFileDialog.getSaveFileName(self, 
+                                                "Exporter la vue C-Scan", 
+                                                start_path, 
+                                                "Images PNG (*.png);;Images JPEG (*.jpg);;Tous les fichiers (*)")
+
+        # 3. Sauvegarder
+        if fileName:
+            try:
+                # bbox_inches='tight' enlève les marges blanches inutiles autour du graphique
+                self.fig.savefig(fileName, dpi=300, bbox_inches='tight')
+                print(f"Vue C-Scan sauvegardée avec succès : {fileName}")
+                QMessageBox.information(self, "Succès", "L'image a été sauvegardée.")
+            except Exception as e:
+                print(f"Erreur lors de la sauvegarde : {e}")
+                QMessageBox.critical(self, "Erreur", f"Impossible de sauvegarder l'image :\n{e}")
+
+    def update_smoothing_size_label(self):
+        """Met à jour le texte du label quand on bouge le slider de taille."""
+        val = self.smoothing_size_slider.value()
+        
+        # On assure une taille impaire pour les filtres (3x3, 5x5, etc.)
+        # Les filtres d'image fonctionnent mieux avec des noyaux impairs centrés.
+        if val % 2 == 0:
+            val += 1
+            self.smoothing_size_slider.setValue(val)
+            
+        self.smoothing_size_label.setText(f"Taille du filtre (pixels): {val}")
+
+    def export_cscan_gif(self):
+        """Génère et sauvegarde un GIF animé du C-Scan."""
+        
+        # 1. Demander le nom du fichier
+        start_path = "CScan_Animation.gif"
+        if self.basalt.folder:
+            start_path = os.path.join(self.basalt.folder, start_path)
+            
+        fileName, _ = QFileDialog.getSaveFileName(self, "Exporter Animation GIF", start_path, "Fichiers GIF (*.gif)")
+        
+        if not fileName:
+            return
+
+        # 2. Configuration de l'export
+        num_samples = self.processed_data_3d.shape[0]
+        
+        # Optimisation : Pour ne pas avoir un GIF de 1000 images (trop lourd), 
+        # on limite à environ 100 images maximum en sautant des étapes.
+        step = max(1, num_samples // 100)
+        
+        frames = []
+        original_slider_val = self.slider.value() # On mémorise la position actuelle
+        
+        # 3. Barre de progression
+        progress = QProgressDialog("Génération de l'animation...", "Annuler", 0, num_samples, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        
+        try:
+            print(f"Début de la génération du GIF ({num_samples} samples, step={step})...")
+            
+            # 4. Boucle sur les tranches
+            for i in range(0, num_samples, step):
+                if progress.wasCanceled():
+                    print("Export GIF annulé.")
+                    break
+                
+                # On déplace le slider (ce qui met à jour le graphique via update_slice_display)
+                self.slider.setValue(i)
+                # On force le redessin immédiat
+                QApplication.processEvents() 
+                
+                # Capture de l'image actuelle du graphique dans la mémoire (buffer)
+                buf = io.BytesIO()
+                # dpi=100 est suffisant pour un GIF, bbox_inches='tight' enlève les bords blancs
+                self.fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                buf.seek(0)
+                
+                # Création de l'objet Image PIL et ajout à la liste
+                frame = Image.open(buf)
+                frames.append(frame)
+                
+                progress.setValue(i)
+
+            # 5. Sauvegarde du GIF
+            if frames:
+                # duration : temps par image en ms (100ms = 10 fps)
+                # loop=0 : boucle infinie
+                frames[0].save(fileName, save_all=True, append_images=frames[1:], 
+                               optimize=True, duration=100, loop=0)
+                
+                print(f"GIF sauvegardé avec succès : {fileName}")
+                QMessageBox.information(self, "Succès", f"L'animation a été sauvegardée.\n({len(frames)} images)")
+
+        except Exception as e:
+            print(f"Erreur export GIF : {e}")
+            QMessageBox.critical(self, "Erreur", f"Impossible de créer le GIF :\n{e}")
+            
+        finally:
+            # On remet le slider à sa position d'origine
+            self.slider.setValue(original_slider_val)
+            progress.close()
+
+    def run_full_processing(self):
+        """
+        Retraite l'intégralité du bloc de données 3D en appliquant
+        les paramètres de traitement actuels de la fenêtre principale.
+        """
+        print("C-Scan : Reprocession des données 3D...")
+        
+        # On récupère les valeurs de la fenêtre principale
+        values = self.basalt.traitementValues
+        y_offset = values.T0
+        
+        # On vérifie si on est en mode simplifié
+        # (self.basalt.is_simplified_mode est mis à jour par le menu de la fenêtre principale)
+        is_simplified = self.basalt.is_simplified_mode
+        if is_simplified:
+            print("C-Scan : Traitement en mode simplifié.")
+
+        # On boucle sur chaque profil (le 3e axe du cube)
+        for i in range(self.raw_data_3d.shape[2]):
+            # On prend une copie du scan brut
+            scan_data = self.raw_data_3d[:, :, i].copy()
+            
+            # On applique la chaîne de traitement
+            temp_traitement = Traitement(scan_data, y_offset=y_offset)
+            
+            # --- Logique de traitement (copiée de traitementScan) ---
+            
+            # 1. Miroir (si serpentin)
+            mode = values.profile_direction_mode
+            should_mirror = (mode == 'mirror_all') or \
+                            (mode == 'mirror_serpentine' and i % 2 == 1)
+            if should_mirror:
+                temp_traitement.apply_mirror()
+            
+            # 2. Filtres de base
+            if values.is_dewow_active:
+                temp_traitement.dewow_filter()
+            
+            if values.is_sub_mean:
+                # --- CORRECTION DE L'ERREUR ---
+                # On fournit les arguments manquants
+                temp_traitement.sub_mean(
+                    mode=values.sub_mean_mode,
+                    window_size=values.sub_mean_window,
+                    trim_percent=values.sub_mean_trim_percent
+                )
+            
+            # 3. Filtres avancés (uniquement en mode normal)
+            if not is_simplified and values.is_filtre_freq:
+                temp_traitement.filtre_frequence(
+                    antenna_freq=values.antenna_freq,
+                    sampling_freq=values.sampling_freq
+                )
+            
+            # 4. Gains
+            if values.is_agc_active:
+                temp_traitement.apply_agc(values.agc_window_size)
+            elif values.is_normalization_active:
+                temp_traitement.apply_normalization()
+            elif values.is_energy_decay_active:
+                temp_traitement.apply_energy_decay_gain()
+            # Gains manuels (uniquement en mode normal)
+            elif not is_simplified:
+                temp_traitement.apply_total_gain(
+                    t0_exp=values.t0_exp,
+                    t0_lin=values.t0_lin,
+                    g=values.g,
+                    a_lin=values.a_lin,
+                    a=values.a_exp,
+                    t_max_exp=values.t_max_exp
+                )
+            # --- Fin de la logique de traitement ---
+
+            # On stocke le résultat traité
+            self.processed_data_3d[:, :, i] = temp_traitement.data
+
+        print("C-Scan : Reprocession terminée.")
+
+        # --- Application du lissage ---
+        smoothing_type = self.smoothing_type_combo.currentText()
+        smoothing_size = self.smoothing_size_slider.value()
+        
+        if smoothing_type != "Aucun" and smoothing_size > 1:
+            print(f"Application du lissage {smoothing_type} avec une taille de {smoothing_size}...")
+            
+            # On va lisser le cube 3D des données traitées
+            # Le lissage s'applique en 2D sur chaque tranche (samples, traces) du C-Scan
+            
+            # Pour une meilleure performance et un contrôle plus fin, 
+            # on peut lisser la tranche affichée plutôt que tout le cube 3D.
+            # Ou on crée une version 'smoothed_data_3d' si on veut lisser tout.
+            # Pour le moment, on va lisser la tranche au moment de l'affichage.
+            # Il faut donc modifier `update_slice_display`.
+            pass # La logique sera déplacée dans update_slice_display
+        # --- FIN NOUVEAU BLOC ---
+
+        # On met à jour l'affichage avec la tranche actuelle
+        self.update_slice_display()
+
+
+    def update_slice_display(self):
+        """Met à jour l'image 2D affichée avec des axes physiques réels."""
+        if self.processed_data_3d is None: return
+
+        sample_index = self.slider.value()
+        
+        # --- 1. Récupération des paramètres physiques ---
+        # On utilise le header du fichier actuellement chargé dans la fenêtre principale comme référence
+        # (ou des valeurs par défaut si rien n'est chargé)
+        if self.main_window.basalt.data:
+            ref_header = self.main_window.basalt.data.header
+            # Si l'utilisateur a forcé une distance X, on l'utilise, sinon on prend celle du header
+            user_x_dist = self.basalt.traitementValues.X_dist
+            total_distance_m = user_x_dist if user_x_dist is not None else ref_header.value_dist_total
+            total_time_ns = ref_header.value_time
+        else:
+            # Valeurs de secours si aucun fichier n'est chargé
+            total_distance_m = 10.0 
+            total_time_ns = 100.0
+
+        # --- 2. Calcul de la Profondeur (Z) ---
+        epsilon = self.basalt.traitementValues.epsilon
+        # Vitesse de la lumière en m/ns (0.299...)
+        c_lum_mns = 0.299792458 
+        vitesse = c_lum_mns / np.sqrt(epsilon)
+        
+        # Profondeur maximale de la fenêtre temporelle (aller-retour / 2)
+        max_depth_m = (total_time_ns * vitesse) / 2.0
+        
+        # Profondeur de la coupe actuelle (règle de trois sur les samples)
+        total_samples = self.processed_data_3d.shape[0]
+        current_depth_m = (sample_index / total_samples) * max_depth_m
+        
+        # Mise à jour du label du slider
+        self.slider_label.setText(f"Slice {sample_index}/{total_samples} - Profondeur : {current_depth_m*100:.1f} cm")
+
+        # --- 3. Préparation des données ---
+        # On prend la tranche de données traitées : (Nb_Traces, Nb_Profils)
+        slice_data = self.processed_data_3d[sample_index, :, :] 
+
+        # Application du lissage (inchangé)
+        smoothing_type = self.smoothing_type_combo.currentText()
+        smoothing_size = self.smoothing_size_slider.value()
+        if smoothing_type != "Aucun" and smoothing_size > 1:
+            if smoothing_type == "Moyenne":
+                slice_data = uniform_filter(slice_data, size=smoothing_size)
+            elif smoothing_type == "Médiane":
+                slice_data = median_filter(slice_data, size=smoothing_size)
+            elif smoothing_type == "Gaussien":
+                slice_data = gaussian_filter(slice_data, sigma=smoothing_size/3.0)
+
+        # --- 4. Affichage avec Extent (Mise à l'échelle) ---
+        self.ax.cla()
+        clim_min, clim_max = self.main_window.radargramme.getRangePlot()
+        
+        # Définition des bornes de l'image [Gouache, Droite, Bas, Haut]
+        # Axe X (Horizontal) = Distance le long du profil (en m)
+        # Axe Y (Vertical) = Numéro du profil (sans unité physique pour l'instant)
+        
+        # slice_data.T inverse les axes pour l'affichage : 
+        # L'axe horizontal de l'image devient l'axe des Traces (Distance)
+        # L'axe vertical de l'image devient l'axe des Profils
+        
+        nb_profils = slice_data.shape[1]
+        
+        self.ax.imshow(slice_data.T, cmap='gray', aspect='auto', vmin=clim_min, vmax=clim_max,
+                       extent=[0, total_distance_m, nb_profils, 0]) 
+        
+        self.ax.set_xlabel("Distance le long du profil (m)")
+        self.ax.set_ylabel("Numéro de Profil")
+        self.ax.set_title(f"C-Scan @ {current_depth_m*100:.1f} cm (ε={epsilon})")
+        
+        self.canvas.draw()
+
+    def closeEvent(self, event):
+        """Détruit la référence dans la fenêtre principale pour libérer la mémoire."""
+        self.main_window.cscan_window = None
+        print("Fenêtre C-Scan fermée.")
+        super().closeEvent(event)
+
 class MainWindow():
     def __init__(self, softwarename:str):
         
@@ -150,6 +653,7 @@ class MainWindow():
         self.basalt :Basalt = Basalt()
         self.is_simplified_mode = False
         self.manual_gain_widgets = []
+        self.cscan_window = None
         self.window.setGeometry(100, 100, 1600, 900)
         settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
 
@@ -243,6 +747,13 @@ class MainWindow():
         
         # Création des différents Menus
         file_menu = menu_bar.addMenu("Fichier")
+
+        # --- 3D view ---
+        tools_menu = menu_bar.addMenu("Outils")
+        
+        cscan_action = QAction("Générer une vue en coupe (C-Scan)...", self.window)
+        cscan_action.triggered.connect(self.on_launch_cscan_clicked)
+        tools_menu.addAction(cscan_action)
 
         # Création des actions pour le menu "Fichier"
         open_folder_action = QAction("Ouvrir un dossier", self.window)
@@ -589,6 +1100,9 @@ class MainWindow():
         # 2. Appeler la fonction de redessin pour afficher le résultat
         self.redraw_plot()
         
+        # Si la fenêtre C-Scan est ouverte, on lui dit de se mettre à jour aussi
+        if self.cscan_window:
+            self.cscan_window.run_full_processing()
 
     def create_gain_page(self):
         """Crée et retourne la page des paramètres de gain, sans GroupBox."""
@@ -992,10 +1506,11 @@ class MainWindow():
 
         return options_widget
 
-    def populate_listFile_widget(self):
-        """Remplit le QListWidget avec les noms de fichiers, triés numériquement."""
-        self.listFile_widget.clear()
-
+    def _get_current_file_list(self) -> list[Path]:
+        """
+        Retourne la liste de fichiers filtrée et triée en fonction des sélections de l'UI.
+        Gère le cas spécial de l'extension virtuelle ".DZT (Multi-Canal)".
+        """
         selected_option = self.combo_box_extension.currentText()
         
         # On détermine la véritable extension de fichier à rechercher
@@ -1004,14 +1519,20 @@ class MainWindow():
         else:
             actual_extension = selected_option
             
-        # On utilise cette extension corrigée pour la recherche de fichiers
         extension_filter = self.constante.getFiltreExtension(actual_extension)
+        freq_key = self.constante.getFiltreFreq(self.combo_box_frequence.currentText())
         
-        # Le reste de la fonction est inchangé, mais utilise le nouveau filtre
-        sorted_files = self.basalt.getFilesFiltered(
+        return self.basalt.getFilesFiltered(
             extension_filter=extension_filter,
-            freq_key=self.constante.getFiltreFreq(self.combo_box_frequence.currentText())
+            freq_key=freq_key
         )
+
+    def populate_listFile_widget(self):
+        """Remplit le QListWidget avec les noms de fichiers, triés numériquement."""
+        self.listFile_widget.clear()
+        
+        # On utilise notre nouvelle fonction centralisée
+        sorted_files = self._get_current_file_list()
         
         for file in sorted_files:
             list_item = QListWidgetItem(file.stem)
@@ -1753,7 +2274,124 @@ class MainWindow():
         # --- FIN DE LA CORRECTION ---
 
         print("--- Export de tous les scans terminé ! ---")
+# DANS LA CLASSE MainWindow
 
+    def on_launch_cscan_clicked(self):
+        """
+        Charge TOUTES les données brutes du dossier et lance la fenêtre C-Scan.
+        Gère les fichiers de dimensions légèrement différentes en les découpant.
+        """
+        # 1. Vérifications de base (inchangé)
+        if not self.basalt.folder:
+            QMessageBox.warning(self.window, "Erreur", "Veuillez d'abord ouvrir un dossier.")
+            return
+            
+        if self.cscan_window:
+            self.cscan_window.activateWindow()
+            return
+            
+        files_to_process = self._get_current_file_list()
+        if not files_to_process:
+            QMessageBox.warning(self.window, "Erreur", "Aucun fichier à traiter dans la liste.")
+            return
+
+        # 2. Message de chargement (inchangé)
+        loading_msg = QMessageBox(QMessageBox.Icon.Information, "Analyse...", 
+                                f"Analyse de {len(files_to_process)} scans...\nVeuillez patienter...", 
+                                QMessageBox.StandardButton.NoButton, self.window)
+        loading_msg.show()
+        QApplication.processEvents()
+
+        # --- PASSE 1 : Analyse des dimensions (inchangé) ---
+        target_samples = None
+        target_traces = float('inf')
+        valid_files = []
+        skipped_files = []
+        
+        y_offset = self.basalt.traitementValues.T0
+        y_lim = self.basalt.traitementValues.T_lim
+        decimation = self.basalt.traitementValues.decimation_factor
+
+        try:
+            for file in files_to_process:
+                # ... (logique de chargement RadarData pour analyse, inchangé) ...
+                selected_option = self.combo_box_extension.currentText()
+                radar_type = self.constante.getRadarByExtension(file.suffix)
+                if selected_option == ".DZT (Multi-Canal)" and file.suffix.upper() == ".DZT":
+                    radar_type = Radar.GSSI_FLEX
+                data_obj = RadarData(file, radar_type, decimation)
+                
+                raw_data_array = self.basalt._getDataTraité(data_obj.dataFile)
+                total_samples, total_traces = raw_data_array.shape
+                y_start = int(y_offset)
+                y_end = int(y_lim if y_lim is not None else total_samples)
+                cut_data = raw_data_array[y_start:y_end, :]
+                
+                current_samples, current_traces = cut_data.shape
+
+                if target_samples is None:
+                    target_samples = current_samples
+                
+                if current_samples != target_samples:
+                    skipped_files.append(f"{file.name} (samples: {current_samples})")
+                    continue
+
+                MIN_TRACE_THRESHOLD = 100
+                if current_traces < MIN_TRACE_THRESHOLD:
+                    skipped_files.append(f"{file.name} (traces: {current_traces})")
+                    continue
+                    
+                target_traces = min(target_traces, current_traces)
+                valid_files.append((file, data_obj))
+
+            if not valid_files:
+                raise ValueError("Aucun fichier valide avec des dimensions cohérentes n'a été trouvé.")
+
+            # --- PASSE 2 : Découpage et Assemblage (inchangé) ---
+            loading_msg.setText(f"Assemblage du cube 3D ({len(valid_files)} fichiers)...")
+            QApplication.processEvents()
+            
+            all_scans_raw_data = []
+            for file, data_obj in valid_files:
+                raw_data_array = self.basalt._getDataTraité(data_obj.dataFile)
+                y_start = int(y_offset)
+                y_end = int(y_lim if y_lim is not None else target_samples)
+                cut_data_y = raw_data_array[y_start:y_end, :]
+                
+                cropped_data = cut_data_y[:, :target_traces]
+                all_scans_raw_data.append(cropped_data)
+
+            raw_3d_data = np.stack(all_scans_raw_data, axis=-1)
+            
+            # --- C'EST ICI QUE SE TROUVE LA MODIFICATION ---
+            
+            # 1. On prépare la liste des positions pour l'axe Y du C-Scan
+            # Pour l'instant, ce sont juste des index (0, 1, 2...), mais la structure est prête
+            # pour recevoir des distances réelles si on ajoute du GPS plus tard.
+            profile_distances = list(range(len(valid_files))) # <--- NOUVELLE VARIABLE CRÉÉE
+
+            loading_msg.close()
+
+            # 2. On passe cette liste au constructeur de la fenêtre
+            # Notez l'ajout de l'argument 'profile_distances'
+            self.cscan_window = CScanWindow(raw_3d_data, 
+                                            profile_distances, # <--- NOUVEL ARGUMENT PASSÉ ICI
+                                            self.basalt, 
+                                            self)
+            self.cscan_window.show()
+            
+            # --- FIN DE LA MODIFICATION ---
+            
+            if skipped_files:
+                QMessageBox.warning(self.window, "Fichiers Ignorés",
+                                    "Les fichiers suivants ont été ignorés car leurs dimensions étaient incohérentes :\n\n" +
+                                    "\n".join(skipped_files))
+
+        except Exception as e:
+            loading_msg.close()
+            QMessageBox.critical(self.window, "Erreur de Données", f"Une erreur est survenue lors du chargement des données 3D : \n{e}")
+   
+   
     @property
     def getFiles(self): 
         files = self.basalt.getFilesInFolder('*.dzt')
@@ -1766,7 +2404,8 @@ class Basalt():
         self.data : RadarData = None
         self.traitement : Traitement = None
         self.selectedFile : Path = None
-        
+        self.is_simplified_mode: bool = False
+
         self.antenna : Radar
         self.subMean : bool = False
         self.filtreFreq : bool = False
@@ -1988,7 +2627,8 @@ class Basalt():
             return 0
 
         # 1. On récupère d'abord le tableau de données du bon canal
-        data_to_analyze = self._getDataTraité(self.data.dataFile)
+        # C'est la source de données "brutes" pour ce canal
+        data_to_analyze = self._getDataTraité(self.data.dataFile) 
 
         if data_to_analyze.size == 0:
             return 0
@@ -1997,12 +2637,18 @@ class Basalt():
         start_sample = 10 
         end_sample = data_to_analyze.shape[0]
         
+        # Règle spécifique pour les GSSI Flex (au cas où, bien que le tableau soit déjà splitté)
+        if self.antenna == Radar.GSSI_FLEX:
+            end_sample = min(end_sample, 1022) 
+            
         if start_sample >= end_sample:
+            print("Avertissement : Zone de recherche invalide pour T0.")
             return 0
 
         abs_data = np.abs(data_to_analyze.astype(np.float32))
         mean_energy_trace = np.mean(abs_data, axis=1)
         
+        # 3. On applique argmax UNIQUEMENT sur la tranche qui nous intéresse
         relative_index = np.argmax(mean_energy_trace[start_sample:end_sample])
         
         # Le résultat est déjà la position relative dans le canal, c'est ce qu'il nous faut
@@ -2149,8 +2795,11 @@ class RadarData():
                 reshaped_data = dzt_data.reshape(self.header.value_trace, self.header.value_sample)
             else: # Cas Radar.GSSI_FLEX (.dzt ou .DZT Multi-Canal)
                 # Cas MULTI-CANAL : le header donne le nb de samples pour 1 canal, on en a 2
-                reshaped_data = dzt_data.reshape(self.header.value_trace, self.header.value_sample * 2)
-
+                size = self.header.value_trace * self.header.value_sample * 2
+                if dzt_data.size == size: 
+                    reshaped_data = dzt_data.reshape(self.header.value_trace, self.header.value_sample * 2)
+                else: 
+                    reshaped_data = dzt_data.reshape(self.header.value_trace, self.header.value_sample)
             data = reshaped_data.transpose()
             
         # elif(self.path.suffix == ".DZT"):
