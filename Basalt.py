@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import QProgressDialog # Pour la barre de chargement
 
 import sys
 from PyQt6.QtCore import Qt, QSettings
-from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton
+from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog, QGridLayout, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton,QDialog, QFormLayout, QDialogButtonBox
 from PyQt6.QtGui import QAction, QFont, QIntValidator
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtGui import QDoubleValidator, QValidator
@@ -166,7 +166,35 @@ class AcceptEmptyDoubleValidator(QDoubleValidator):
         # normal du QDoubleValidator parent.
         return super().validate(input_str, pos)
 
-# À AJOUTER APRÈS LA CLASSE Graphique
+class AnnotationDialog(QDialog):
+    """Boîte de dialogue personnalisée pour saisir Label et Couleur en même temps."""
+    def __init__(self, parent=None, title="Nouvelle Annotation"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+
+        layout = QFormLayout(self)
+
+        # Champ Label
+        self.label_input = QLineEdit()
+        self.label_input.setPlaceholderText("Nom de l'annotation (optionnel)")
+        layout.addRow("Label :", self.label_input)
+
+        # Champ Couleur
+        self.color_input = QComboBox()
+        colors = ["red", "orange", "green", "blue", "yellow", "cyan", "magenta", "white", "black"]
+        self.color_input.addItems(colors)
+        layout.addRow("Couleur :", self.color_input)
+
+        # Boutons OK / Annuler
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_data(self):
+        """Retourne le tuple (label, couleur)."""
+        return self.label_input.text(), self.color_input.currentText()
 
 class CScanWindow(QWidget):
     """
@@ -664,19 +692,113 @@ class CScanWindow(QWidget):
         super().closeEvent(event)
 
 class MainWindow():
-    def __init__(self, softwarename:str):
+    # def __init__(self, softwarename:str):
+        
+    #     self.constante = Const()
+
+    #     # Création de notre fenêtre principale
+    #     self.app = QApplication(sys.argv)
+    #     self.window = QMainWindow()
+    #     self.window.setWindowTitle(softwarename)
+        
+    #     self.basalt :Basalt = Basalt()
+    #     self.is_simplified_mode = False
+    #     self.manual_gain_widgets = []
+    #     self.cscan_window = None
+    #     self.window.setGeometry(100, 100, 1600, 900)
+    #     settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
+
+    #     geometry = settings.value("geometry")
+    #     if geometry:
+    #         self.window.restoreGeometry(geometry)
+
+    #     last_folder = settings.value("last_folder", "") # "" est la valeur par défaut
+    #     self.basalt.last_used_folder = last_folder
+    #     last_extension = settings.value("last_extension_filter", self.constante.ext_list[0])
+
+    #     # UI 
+    #     self.window.central_widget = QWidget()
+    #     self.window.setCentralWidget(self.window.central_widget)
+    #     self.main_layout = QHBoxLayout(self.window.central_widget)
+
+    #             # --- CRÉATION DU PANNEAU DE CONTRÔLE DE GAUCHE ---
+    #     # Ce widget contiendra tous les boutons, sliders, etc.
+    #     self.control_panel_widget = QWidget()
+    #     # On donne à ce widget son propre layout vertical
+    #     self.control_layout = QVBoxLayout(self.control_panel_widget)
+    #     # On peut fixer la largeur du panneau de contrôle pour un meilleur design
+    #     self.control_panel_widget.setFixedWidth(350)
+    #     self.init_ui()
+
+    #     self.combo_box_extension.setCurrentText(last_extension)
+
+    #     self.menu()
+
+    #     # 1. On crée un QSplitter horizontal. C'est notre nouveau conteneur.
+    #     self.splitter = QSplitter(Qt.Orientation.Horizontal)
+
+    #     # 2. On crée les graphiques comme avant
+    #     self.fig = Figure(figsize=(12, 10), dpi=100)
+    #     self.canvas = FigureCanvas(self.fig)
+    #     self.ax = self.fig.add_subplot(111)
+    #     self.radargramme = Graphique(self.ax, self.fig)
+
+    #     # A-Scan
+    #     self.trace_fig = Figure(figsize=(4, 10), dpi=100)
+    #     # On applique tight_layout à cette figure pour optimiser l'espace
+    #     self.trace_fig.tight_layout() 
+    #     self.trace_canvas = FigureCanvas(self.trace_fig)
+    #     self.trace_ax = self.trace_fig.add_subplot(111)
+    #     # On crée un objet Graphique dédié pour lui
+    #     self.trace_plot = Graphique(self.trace_ax, self.trace_fig)
+
+    #     # 3. On ajoute directement les canevas au splitter
+    #     self.splitter.addWidget(self.canvas)
+    #     self.splitter.addWidget(self.trace_canvas)
+
+    #     # 4. On peut toujours définir des proportions de départ
+    #     # Le splitter les respectera au premier affichage.
+    #     self.splitter.setStretchFactor(0, 4)
+    #     self.splitter.setStretchFactor(1, 1)
+
+    #     # 5. On assemble la fenêtre principale
+    #     self.main_layout.addWidget(self.control_panel_widget) # Bloc de gauche
+    #     self.main_layout.addWidget(self.splitter)            # Bloc de droite (maintenant le splitter)
+    #     self.drawing_mode = None
+    #     self.box_start_pos = None
+
+    #     self.window.closeEvent = self.closeEvent
+    #     self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+    #     self.canvas.mpl_connect('button_release_event', self.on_mouse_release)
+    #     self.canvas.mpl_connect('button_press_event', self.on_mouse_click)
+    #     self.rs = RectangleSelector(self.ax, self.on_select_box_finished,
+    #                                 useblit=True,
+    #                                 button=[1], # Clic gauche uniquement
+    #                                 minspanx=5, minspany=5, # Ignorer les micro-mouvements
+    #                                 spancoords='pixels',
+    #                                 interactive=True, # Permet de redimensionner après coup (optionnel)
+    #                                 props=dict(facecolor='red', edgecolor='black', alpha=0.2, fill=True))
+        
+    #     self.rs.set_active(False) # Désactivé par défaut
+
+    def __init__(self, softwarename: str):
         
         self.constante = Const()
 
-        # Création de notre fenêtre principale
+        # 1. Création de la fenêtre principale
         self.app = QApplication(sys.argv)
         self.window = QMainWindow()
         self.window.setWindowTitle(softwarename)
         
-        self.basalt :Basalt = Basalt()
+        # 2. Initialisation des variables d'état (CRUCIAL pour éviter les plantages)
+        self.basalt : Basalt = Basalt()
         self.is_simplified_mode = False
         self.manual_gain_widgets = []
-        self.cscan_window = None
+        self.cscan_window = None    # Évite le crash si on clique sur C-Scan trop vite
+        self.drawing_mode = None    # Évite le crash au clic sur le graph
+        self.box_start_pos = None   # Pour le dessin manuel (si besoin)
+
+        # 3. Gestion des paramètres (Geometry, Last folder...)
         self.window.setGeometry(100, 100, 1600, 900)
         settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
 
@@ -684,74 +806,75 @@ class MainWindow():
         if geometry:
             self.window.restoreGeometry(geometry)
 
-        last_folder = settings.value("last_folder", "") # "" est la valeur par défaut
+        last_folder = settings.value("last_folder", "") 
         self.basalt.last_used_folder = last_folder
         last_extension = settings.value("last_extension_filter", self.constante.ext_list[0])
 
-        # UI 
+        # 4. Configuration de l'interface principale (Layouts)
         self.window.central_widget = QWidget()
         self.window.setCentralWidget(self.window.central_widget)
         self.main_layout = QHBoxLayout(self.window.central_widget)
 
-                # --- CRÉATION DU PANNEAU DE CONTRÔLE DE GAUCHE ---
-        # Ce widget contiendra tous les boutons, sliders, etc.
+        # --- PANNEAU GAUCHE (Contrôles) ---
         self.control_panel_widget = QWidget()
-        # On donne à ce widget son propre layout vertical
         self.control_layout = QVBoxLayout(self.control_panel_widget)
-        # On peut fixer la largeur du panneau de contrôle pour un meilleur design
         self.control_panel_widget.setFixedWidth(350)
-        self.init_ui()
-
+        
+        # Construction du contenu du panneau gauche
+        self.init_ui() 
+        
+        # On restaure l'extension après avoir créé l'interface
         self.combo_box_extension.setCurrentText(last_extension)
-
+        
+        # Construction du menu
         self.menu()
 
-        # 1. On crée un QSplitter horizontal. C'est notre nouveau conteneur.
+        # --- PANNEAU DROIT (Graphiques) ---
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 2. On crée les graphiques comme avant
+        # A. Radargramme (Gauche du splitter)
         self.fig = Figure(figsize=(12, 10), dpi=100)
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111)
         self.radargramme = Graphique(self.ax, self.fig)
 
-        # A-Scan
+        # B. A-Scan (Droite du splitter)
         self.trace_fig = Figure(figsize=(4, 10), dpi=100)
-        # On applique tight_layout à cette figure pour optimiser l'espace
         self.trace_fig.tight_layout() 
         self.trace_canvas = FigureCanvas(self.trace_fig)
         self.trace_ax = self.trace_fig.add_subplot(111)
-        # On crée un objet Graphique dédié pour lui
         self.trace_plot = Graphique(self.trace_ax, self.trace_fig)
 
-        # 3. On ajoute directement les canevas au splitter
+        # Assemblage du Splitter
         self.splitter.addWidget(self.canvas)
         self.splitter.addWidget(self.trace_canvas)
-
-        # 4. On peut toujours définir des proportions de départ
-        # Le splitter les respectera au premier affichage.
         self.splitter.setStretchFactor(0, 4)
         self.splitter.setStretchFactor(1, 1)
 
-        # 5. On assemble la fenêtre principale
-        self.main_layout.addWidget(self.control_panel_widget) # Bloc de gauche
-        self.main_layout.addWidget(self.splitter)            # Bloc de droite (maintenant le splitter)
-        self.drawing_mode = None
-        self.box_start_pos = None
+        # Assemblage final de la fenêtre
+        self.main_layout.addWidget(self.control_panel_widget)
+        self.main_layout.addWidget(self.splitter)
 
+        # 5. Connexions des événements et Outils interactifs
         self.window.closeEvent = self.closeEvent
+        
+        # Souris
         self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
-        self.canvas.mpl_connect('button_release_event', self.on_mouse_release)
         self.canvas.mpl_connect('button_press_event', self.on_mouse_click)
+        self.canvas.mpl_connect('button_release_event', self.on_mouse_release)
+        
+        # Outil RectangleSelector (pour les zones)
+        # Il est créé ici mais désactivé par défaut (set_active(False))
         self.rs = RectangleSelector(self.ax, self.on_select_box_finished,
                                     useblit=True,
                                     button=[1], # Clic gauche uniquement
-                                    minspanx=5, minspany=5, # Ignorer les micro-mouvements
+                                    minspanx=5, minspany=5,
                                     spancoords='pixels',
-                                    interactive=True, # Permet de redimensionner après coup (optionnel)
+                                    interactive=True,
                                     props=dict(facecolor='red', edgecolor='black', alpha=0.2, fill=True))
         
-        self.rs.set_active(False) # Désactivé par défaut
+        self.rs.set_active(False)
+
     def closeEvent(self, event):
         """
         Cette méthode est automatiquement appelée par Qt juste avant que la fenêtre ne se ferme.
@@ -849,26 +972,18 @@ class MainWindow():
         
         # Si on est en mode Point et clic gauche
         if self.drawing_mode == "point" and event.button == 1:
-            # 1. Demander le Label (Optionnel)
-            label, ok = QInputDialog.getText(self.window, "Nouveau Point", "Label (optionnel) :")
-            if not ok: return # Annulation
             
-            # 2. Demander la Couleur
-            colors = ["red", "orange", "green", "blue", "yellow", "cyan", "magenta", "white", "black"]
-            color, ok = QInputDialog.getItem(self.window, "Couleur du point", "Choisir une couleur :", 
-                                             colors, 0, False)
-            if not ok: return # Annulation
-
-            # 3. Créer le point
-            # On accepte le label même s'il est vide ("")
-            new_pick = Pick(label, event.xdata, event.ydata, color)
-            
-            # Ajout aux données
-            self.basalt.add_pick(new_pick)
-            
-            # Mise à jour de l'affichage
-            self._update_annotation_list()
-            self.redraw_plot()
+            # --- UTILISATION DU NOUVEAU DIALOGUE ---
+            dialog = AnnotationDialog(self.window, "Nouveau Point")
+            if dialog.exec(): # Si l'utilisateur clique sur OK
+                label, color = dialog.get_data()
+                
+                # Création du point avec les 2 infos d'un coup
+                new_pick = Pick(label, event.xdata, event.ydata, color)
+                
+                self.basalt.add_pick(new_pick)
+                self._update_annotation_list()
+                self.redraw_plot()
 
     def on_mouse_release(self, event):
             """
@@ -877,47 +992,46 @@ class MainWindow():
             """
             pass
 
-
     def on_select_box_finished(self, eclick, erelease):
-        """
-        Appelé automatiquement par RectangleSelector quand on relâche la souris.
-        eclick : événement au clic (début)
-        erelease : événement au relâchement (fin)
-        """
-        # Récupération des coordonnées triées (min, max)
+        """Appelé automatiquement par RectangleSelector quand on relâche la souris."""
+        
         x1, y1 = eclick.xdata, eclick.ydata
         x2, y2 = erelease.xdata, erelease.ydata
         
         x_min, x_max = sorted([x1, x2])
         y_min, y_max = sorted([y1, y2])
         
-        # --- AJOUT : Cacher immédiatement la boîte de sélection temporaire ---
-        # Cela efface le rectangle rouge de sélection de l'écran
+        # Cacher le rectangle de sélection temporaire
         self.rs.set_visible(False) 
-        self.canvas.draw_idle() # Demande un redessin rapide
-        # --------------------------------------------------------------------
+        self.canvas.draw_idle()
 
-
-        # On demande les infos à l'utilisateur
-        label, ok = QInputDialog.getText(self.window, "Nouvelle Zone", "Label de la zone (ex: D1) :")
-        if not ok: 
-            # Si annuler, on redessine pour effacer le rectangle de sélection
-            self.redraw_plot()
-            return
-        
-        color, ok = QInputDialog.getItem(self.window, "Couleur", "Choisir une couleur :", 
-                                         ["orange", "red", "green", "blue", "yellow"], 0, False)
-        if not ok: 
-            self.redraw_plot()
+        # Si le rectangle est trop petit (clic involontaire), on annule
+        if abs(x_max - x_min) < 0.1 or abs(y_max - y_min) < 0.1:
+            self.rs.set_visible(True)
             return
 
-        # On crée la boîte et on l'ajoute aux données
-        new_box = BoxAnnotation(x_min, x_max, y_min, y_max, label, color)
-        self.basalt.add_box(new_box)
+        # --- UTILISATION DU NOUVEAU DIALOGUE ---
+        dialog = AnnotationDialog(self.window, "Nouvelle Zone")
         
-        # On met à jour l'affichage et la liste
-        self._update_annotation_list()
-        self.redraw_plot()
+        if dialog.exec(): # Si OK
+            label, color = dialog.get_data()
+            
+            # On crée la boîte
+            new_box = BoxAnnotation(x_min, x_max, y_min, y_max, label, color)
+            self.basalt.add_box(new_box)
+            
+            # On réactive la visibilité pour le prochain tracé
+            self.rs.set_visible(True)
+            
+            self._update_annotation_list()
+            self.redraw_plot()
+            
+        else: # Si Annuler
+            # On réinitialise l'outil pour effacer le fantôme visuel
+            self.rs.set_visible(True)
+            self.rs.set_active(False)
+            self.rs.set_active(True)
+            self.redraw_plot()
 
     def menu(self):
         # Création de la barre de menu
@@ -1228,7 +1342,7 @@ class MainWindow():
         self.interpolation_container.setVisible(not is_simplified)
 
         #Decimate
-        self.decimation_container.setVisible(not is_simplified)
+        #self.decimation_container.setVisible(not is_simplified)
         # Auto-Trim
         self.autotrim_container.setVisible(not is_simplified)
         # IMPORTANT: On met à jour l'état des gains auto/manuels
@@ -1558,177 +1672,319 @@ class MainWindow():
     def create_info_page(self):
         pass
 
+    # def create_options_page(self):
+    #     """Crée et retourne la page des options d'affichage."""
+    #     options_widget = QWidget()
+    #     options_layout = QVBoxLayout(options_widget) # Le layout vertical principal de l'onglet
+
+    #     # --- Section pour les graduations de l'axe X ---
+    #     label_xticks = QLabel("--- Graduations de l'axe X (Grille Verticale) ---")
+    #     label_xticks.setStyleSheet("font-weight: bold; margin-top: 10px;")
+    #     options_layout.addWidget(label_xticks)
+
+    #     # 1. On met la checkbox directement dans le layout vertical
+    #     self.checkbox_show_x_ticks = QCheckBox("Afficher la Grille Verticale")
+    #     self.checkbox_show_x_ticks.setChecked(False)
+    #     options_layout.addWidget(self.checkbox_show_x_ticks)
+
+    #     # 2. On crée un layout horizontal juste pour le champ "Nombre"
+    #     x_ticks_number_layout = QHBoxLayout()
+    #     x_ticks_number_layout.addWidget(QLabel("Nombre de lignes :"))
+    #     self.line_edit_x_ticks = QLineEdit()
+    #     self.line_edit_x_ticks.setText(str(self.basalt.traitementValues.X_ticks))
+    #     self.line_edit_x_ticks.setValidator(QDoubleValidator(1, 100, 0))
+    #     x_ticks_number_layout.addWidget(self.line_edit_x_ticks)
+    #     # On ajoute ce layout horizontal au layout vertical principal
+    #     options_layout.addLayout(x_ticks_number_layout)
+
+
+    #     # --- Section pour les graduations de l'axe Y ---
+    #     label_yticks = QLabel("--- Graduations de l'axe Y (Grille Horizontale) ---")
+    #     label_yticks.setStyleSheet("font-weight: bold; margin-top: 20px;")
+    #     options_layout.addWidget(label_yticks)
+        
+    #     # 1. On met la checkbox directement dans le layout vertical
+    #     self.checkbox_show_y_ticks = QCheckBox("Afficher la Grille Horizontale")
+    #     self.checkbox_show_y_ticks.setChecked(False)
+    #     options_layout.addWidget(self.checkbox_show_y_ticks)
+
+    #     # 2. On crée un layout horizontal juste pour le champ "Nombre"
+    #     y_ticks_number_layout = QHBoxLayout()
+    #     y_ticks_number_layout.addWidget(QLabel("Nombre de lignes :"))
+    #     self.line_edit_y_ticks = QLineEdit()
+    #     self.line_edit_y_ticks.setText(str(self.basalt.traitementValues.Y_ticks))
+    #     self.line_edit_y_ticks.setValidator(QDoubleValidator(1, 100, 0))
+    #     y_ticks_number_layout.addWidget(self.line_edit_y_ticks)
+    #     # On ajoute ce layout horizontal au layout vertical principal
+    #     options_layout.addLayout(y_ticks_number_layout)
+
+
+    #     # La connexion des signaux reste la même
+    #     self.checkbox_show_x_ticks.stateChanged.connect(self.on_show_x_ticks_changed)
+    #     self.line_edit_x_ticks.editingFinished.connect(self.on_x_ticks_edited)
+    #     self.line_edit_x_ticks.returnPressed.connect(self.on_x_ticks_edited)
+        
+    #     self.checkbox_show_y_ticks.stateChanged.connect(self.on_show_y_ticks_changed)
+    #     self.line_edit_y_ticks.editingFinished.connect(self.on_y_ticks_edited)
+    #     self.line_edit_y_ticks.returnPressed.connect(self.on_y_ticks_edited)
+        
+    #     label_direction = QLabel("--- Sens du Profil ---")
+    #     label_direction.setStyleSheet("font-weight: bold; margin-top: 20px;")
+    #     options_layout.addWidget(label_direction)
+
+    #     # On crée les boutons radio 
+    #     self.radio_direction_normal = QRadioButton("Normal (par défaut)")
+    #     self.radio_direction_normal.setChecked(True)
+    #     self.radio_direction_mirror_all = QRadioButton("Inverser tous les profils (Miroir)")
+    #     self.radio_direction_serpentine = QRadioButton("Inverser un profil sur deux (Serpentin)")
+        
+    #     # On les ajoute DIRECTEMENT au layout principal de l'onglet
+    #     options_layout.addWidget(self.radio_direction_normal)
+    #     options_layout.addWidget(self.radio_direction_mirror_all)
+    #     options_layout.addWidget(self.radio_direction_serpentine)
+    #     self.radio_direction_normal.toggled.connect(self.on_direction_mode_changed)
+    #     self.radio_direction_mirror_all.toggled.connect(self.on_direction_mode_changed)
+    #     self.radio_direction_serpentine.toggled.connect(self.on_direction_mode_changed)
+
+    #     options_layout.addStretch() # Pousse tout vers le haut
+
+    #     # --- Section pour la Qualité d'Affichage (dans un conteneur) ---
+
+    #     # 1. On crée le widget conteneur
+    #     self.interpolation_container = QWidget()
+    #     container_layout = QVBoxLayout(self.interpolation_container)
+    #     container_layout.setContentsMargins(0, 0, 0, 0)
+
+    #     # 2. On ajoute les éléments existants au layout du conteneur
+    #     label_interpolation = QLabel("--- Qualité d'Affichage (Interpolation) ---")
+    #     label_interpolation.setStyleSheet("font-weight: bold; margin-top: 10px;")
+    #     container_layout.addWidget(label_interpolation)
+
+    #     interpolation_layout = QHBoxLayout()
+    #     interpolation_layout.addWidget(QLabel("Méthode :"))
+    #     self.combo_interpolation = QComboBox()
+    #     interpolation_options = ['nearest', 'bilinear', 'bicubic', 'lanczos', 'spline16']
+    #     self.combo_interpolation.addItems(interpolation_options)
+    #     interpolation_layout.addWidget(self.combo_interpolation)
+    #     container_layout.addLayout(interpolation_layout)
+
+    #     # 3. On ajoute le conteneur entier au layout principal de la page "Options"
+    #     options_layout.addWidget(self.interpolation_container)
+
+
+    #     # --- Section Réduction des Données (dans un conteneur) ---
+
+    #     # 1. On crée le widget conteneur
+    #     self.decimation_container = QWidget()
+    #     container_layout = QVBoxLayout(self.decimation_container)
+    #     container_layout.setContentsMargins(0, 0, 0, 0)
+
+    #     # 2. On ajoute les éléments existants au layout du conteneur
+    #     line = QFrame()
+    #     line.setFrameShape(QFrame.Shape.HLine)
+    #     line.setFrameShadow(QFrame.Shadow.Sunken)
+    #     container_layout.addWidget(line)
+
+    #     label_decimation = QLabel("--- Réduction des Données (Décimation) ---")
+    #     label_decimation.setStyleSheet("font-weight: bold; margin-top: 10px;")
+    #     container_layout.addWidget(label_decimation)
+
+    #     decimation_layout = QHBoxLayout()
+    #     decimation_layout.addWidget(QLabel("Garder 1 trace sur :"))
+        
+    #     self.line_edit_decimation = QLineEdit(str(self.basalt.traitementValues.decimation_factor))
+    #     self.line_edit_decimation.setValidator(QIntValidator(1, 100)) 
+    #     self.line_edit_decimation.setToolTip("Ex: 2 pour garder une trace sur deux. 1 pour tout garder.")
+    #     self.line_edit_decimation.editingFinished.connect(self.on_decimation_edited)
+    #     decimation_layout.addWidget(self.line_edit_decimation)
+    #     container_layout.addLayout(decimation_layout)
+
+    #     # 3. On ajoute le conteneur entier au layout principal de la page "Options"
+    #     options_layout.addWidget(self.decimation_container)
+
+    #     # --- Section Auto-Trim (dans un conteneur) ---
+    #     self.autotrim_container = QWidget()
+    #     trim_layout = QVBoxLayout(self.autotrim_container)
+    #     trim_layout.setContentsMargins(0, 0, 0, 0)
+
+    #     line_trim = QFrame()
+    #     line_trim.setFrameShape(QFrame.Shape.HLine)
+    #     line_trim.setFrameShadow(QFrame.Shadow.Sunken)
+    #     trim_layout.addWidget(line_trim)
+
+    #     label_trim = QLabel("--- Découpage Auto (Auto-Trim) ---")
+    #     label_trim.setStyleSheet("font-weight: bold; margin-top: 10px;")
+    #     trim_layout.addWidget(label_trim)
+
+    #     trim_controls_layout = QHBoxLayout()
+    #     trim_controls_layout.addWidget(QLabel("Seuil (0-1):"))
+        
+    #     self.line_edit_trim_threshold = QLineEdit("0.05")
+    #     self.line_edit_trim_threshold.setValidator(QDoubleValidator(0.0, 1.0, 3))
+    #     self.line_edit_trim_threshold.setToolTip("Sensibilité au mouvement. Plus bas = plus sensible.")
+    #     trim_controls_layout.addWidget(self.line_edit_trim_threshold)
+        
+    #     self.btn_apply_autotrim = QPushButton("Détecter et Couper")
+    #     self.btn_apply_autotrim.clicked.connect(self.on_autotrim_clicked)
+    #     trim_controls_layout.addWidget(self.btn_apply_autotrim)
+        
+    #     trim_layout.addLayout(trim_controls_layout)
+        
+    #     # --- AJOUT : Case à cocher pour les annotations ---
+    #     line_ano = QFrame()
+    #     line_ano.setFrameShape(QFrame.Shape.HLine)
+    #     line_ano.setFrameShadow(QFrame.Shadow.Sunken)
+    #     options_layout.addWidget(line_ano)
+
+    #     # Création de l'attribut manquant
+    #     self.checkbox_show_annotations = QCheckBox("Afficher les annotations sur le graphique")
+    #     self.checkbox_show_annotations.setChecked(True) # Par défaut, on les voit
+    #     self.checkbox_show_annotations.stateChanged.connect(self.redraw_plot) # Redessine quand on clique
+    #     options_layout.addWidget(self.checkbox_show_annotations)
+    #     # --- FIN DE L'AJOUT ---
+    #     options_layout.addWidget(self.autotrim_container)
+    #     return options_widget
+
     def create_options_page(self):
-        """Crée et retourne la page des options d'affichage."""
+        """Crée et retourne la page des options d'affichage, optimisée pour l'espace."""
         options_widget = QWidget()
-        options_layout = QVBoxLayout(options_widget) # Le layout vertical principal de l'onglet
+        options_layout = QVBoxLayout(options_widget)
+        options_layout.setContentsMargins(5, 5, 5, 5) # Marges minimales
+        options_layout.setSpacing(10) # Espace entre les groupes
 
-        # --- Section pour les graduations de l'axe X ---
-        label_xticks = QLabel("--- Graduations de l'axe X (Grille Verticale) ---")
-        label_xticks.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        options_layout.addWidget(label_xticks)
+        # --- Groupe 1 : Grilles (X et Y côte à côte) ---
+        grid_group = QGroupBox("Grilles")
+        grid_layout = QGridLayout()
+        grid_layout.setContentsMargins(5, 5, 5, 5)
 
-        # 1. On met la checkbox directement dans le layout vertical
-        self.checkbox_show_x_ticks = QCheckBox("Afficher la Grille Verticale")
+        # Grille X
+        self.checkbox_show_x_ticks = QCheckBox("Verticale")
         self.checkbox_show_x_ticks.setChecked(False)
-        options_layout.addWidget(self.checkbox_show_x_ticks)
-
-        # 2. On crée un layout horizontal juste pour le champ "Nombre"
-        x_ticks_number_layout = QHBoxLayout()
-        x_ticks_number_layout.addWidget(QLabel("Nombre de lignes :"))
-        self.line_edit_x_ticks = QLineEdit()
-        self.line_edit_x_ticks.setText(str(self.basalt.traitementValues.X_ticks))
-        self.line_edit_x_ticks.setValidator(QDoubleValidator(1, 100, 0))
-        x_ticks_number_layout.addWidget(self.line_edit_x_ticks)
-        # On ajoute ce layout horizontal au layout vertical principal
-        options_layout.addLayout(x_ticks_number_layout)
-
-
-        # --- Section pour les graduations de l'axe Y ---
-        label_yticks = QLabel("--- Graduations de l'axe Y (Grille Horizontale) ---")
-        label_yticks.setStyleSheet("font-weight: bold; margin-top: 20px;")
-        options_layout.addWidget(label_yticks)
-        
-        # 1. On met la checkbox directement dans le layout vertical
-        self.checkbox_show_y_ticks = QCheckBox("Afficher la Grille Horizontale")
-        self.checkbox_show_y_ticks.setChecked(False)
-        options_layout.addWidget(self.checkbox_show_y_ticks)
-
-        # 2. On crée un layout horizontal juste pour le champ "Nombre"
-        y_ticks_number_layout = QHBoxLayout()
-        y_ticks_number_layout.addWidget(QLabel("Nombre de lignes :"))
-        self.line_edit_y_ticks = QLineEdit()
-        self.line_edit_y_ticks.setText(str(self.basalt.traitementValues.Y_ticks))
-        self.line_edit_y_ticks.setValidator(QDoubleValidator(1, 100, 0))
-        y_ticks_number_layout.addWidget(self.line_edit_y_ticks)
-        # On ajoute ce layout horizontal au layout vertical principal
-        options_layout.addLayout(y_ticks_number_layout)
-
-
-        # La connexion des signaux reste la même
         self.checkbox_show_x_ticks.stateChanged.connect(self.on_show_x_ticks_changed)
+        
+        self.line_edit_x_ticks = QLineEdit(str(self.basalt.traitementValues.X_ticks))
+        self.line_edit_x_ticks.setFixedWidth(50) # Champ compact
+        self.line_edit_x_ticks.setValidator(QDoubleValidator(1, 100, 0))
         self.line_edit_x_ticks.editingFinished.connect(self.on_x_ticks_edited)
-        self.line_edit_x_ticks.returnPressed.connect(self.on_x_ticks_edited)
-        
-        self.checkbox_show_y_ticks.stateChanged.connect(self.on_show_y_ticks_changed)
-        self.line_edit_y_ticks.editingFinished.connect(self.on_y_ticks_edited)
-        self.line_edit_y_ticks.returnPressed.connect(self.on_y_ticks_edited)
-        
-        label_direction = QLabel("--- Sens du Profil ---")
-        label_direction.setStyleSheet("font-weight: bold; margin-top: 20px;")
-        options_layout.addWidget(label_direction)
 
-        # On crée les boutons radio 
-        self.radio_direction_normal = QRadioButton("Normal (par défaut)")
-        self.radio_direction_normal.setChecked(True)
-        self.radio_direction_mirror_all = QRadioButton("Inverser tous les profils (Miroir)")
-        self.radio_direction_serpentine = QRadioButton("Inverser un profil sur deux (Serpentin)")
+        # Grille Y
+        self.checkbox_show_y_ticks = QCheckBox("Horizontale")
+        self.checkbox_show_y_ticks.setChecked(False)
+        self.checkbox_show_y_ticks.stateChanged.connect(self.on_show_y_ticks_changed)
+
+        self.line_edit_y_ticks = QLineEdit(str(self.basalt.traitementValues.Y_ticks))
+        self.line_edit_y_ticks.setFixedWidth(50)
+        self.line_edit_y_ticks.setValidator(QDoubleValidator(1, 100, 0))
+        self.line_edit_y_ticks.editingFinished.connect(self.on_y_ticks_edited)
+
+        # Placement dans la grille (Ligne, Colonne)
+        grid_layout.addWidget(self.checkbox_show_x_ticks, 0, 0)
+        grid_layout.addWidget(QLabel("Nb:"), 0, 1)
+        grid_layout.addWidget(self.line_edit_x_ticks, 0, 2)
         
-        # On les ajoute DIRECTEMENT au layout principal de l'onglet
-        options_layout.addWidget(self.radio_direction_normal)
-        options_layout.addWidget(self.radio_direction_mirror_all)
-        options_layout.addWidget(self.radio_direction_serpentine)
+        grid_layout.addWidget(self.checkbox_show_y_ticks, 1, 0)
+        grid_layout.addWidget(QLabel("Nb:"), 1, 1)
+        grid_layout.addWidget(self.line_edit_y_ticks, 1, 2)
+        
+        grid_group.setLayout(grid_layout)
+        options_layout.addWidget(grid_group)
+
+
+        # --- Groupe 2 : Sens du Profil ---
+        direction_group = QGroupBox("Sens du Profil")
+        direction_layout = QVBoxLayout()
+        direction_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.radio_direction_normal = QRadioButton("Normal")
+        self.radio_direction_normal.setChecked(True)
+        self.radio_direction_mirror_all = QRadioButton("Miroir (Tous)")
+        self.radio_direction_serpentine = QRadioButton("Serpentin (1 sur 2)")
+        
+        direction_layout.addWidget(self.radio_direction_normal)
+        direction_layout.addWidget(self.radio_direction_mirror_all)
+        direction_layout.addWidget(self.radio_direction_serpentine)
+        
         self.radio_direction_normal.toggled.connect(self.on_direction_mode_changed)
         self.radio_direction_mirror_all.toggled.connect(self.on_direction_mode_changed)
         self.radio_direction_serpentine.toggled.connect(self.on_direction_mode_changed)
+        
+        direction_group.setLayout(direction_layout)
+        options_layout.addWidget(direction_group)
 
-        options_layout.addStretch() # Pousse tout vers le haut
 
-        # --- Section pour la Qualité d'Affichage (dans un conteneur) ---
-
-        # 1. On crée le widget conteneur
+        # --- Groupe 3 : Qualité & Décimation (Conteneur dynamique) ---
+        # On utilise un widget conteneur pour pouvoir le masquer en mode simplifié
         self.interpolation_container = QWidget()
-        container_layout = QVBoxLayout(self.interpolation_container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
+        interp_layout = QVBoxLayout(self.interpolation_container)
+        interp_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 2. On ajoute les éléments existants au layout du conteneur
-        label_interpolation = QLabel("--- Qualité d'Affichage (Interpolation) ---")
-        label_interpolation.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        container_layout.addWidget(label_interpolation)
-
-        interpolation_layout = QHBoxLayout()
-        interpolation_layout.addWidget(QLabel("Méthode :"))
+        # Interpolation
+        interp_group = QGroupBox("Qualité (Interpolation)")
+        interp_inner = QHBoxLayout()
+        interp_inner.setContentsMargins(5, 5, 5, 5)
+        interp_inner.addWidget(QLabel("Méthode :"))
         self.combo_interpolation = QComboBox()
-        interpolation_options = ['nearest', 'bilinear', 'bicubic', 'lanczos', 'spline16']
-        self.combo_interpolation.addItems(interpolation_options)
-        interpolation_layout.addWidget(self.combo_interpolation)
-        container_layout.addLayout(interpolation_layout)
+        self.combo_interpolation.addItems(['nearest', 'bilinear', 'bicubic', 'lanczos'])
+        self.combo_interpolation.currentTextChanged.connect(self.on_interpolation_changed)
+        interp_inner.addWidget(self.combo_interpolation)
+        interp_group.setLayout(interp_inner)
+        interp_layout.addWidget(interp_group)
 
-        # 3. On ajoute le conteneur entier au layout principal de la page "Options"
+        # Décimation
+        decim_group = QGroupBox("Réduction (Décimation)")
+        decim_inner = QHBoxLayout()
+        decim_inner.setContentsMargins(5, 5, 5, 5)
+        decim_inner.addWidget(QLabel("1 trace sur :"))
+        self.line_edit_decimation = QLineEdit(str(self.basalt.traitementValues.decimation_factor))
+        self.line_edit_decimation.setValidator(QIntValidator(1, 100))
+        self.line_edit_decimation.editingFinished.connect(self.on_decimation_edited)
+        decim_inner.addWidget(self.line_edit_decimation)
+        decim_group.setLayout(decim_inner)
+        interp_layout.addWidget(decim_group)
+
+        # On lie le conteneur pour le mode simplifié (décimation et interpolation)
+        # Note: J'ai fusionné les deux anciens conteneurs en un seul pour simplifier
+        # Vous devrez mettre à jour _update_ui_for_mode pour utiliser self.interpolation_container
+        # pour cacher tout ce bloc.
         options_layout.addWidget(self.interpolation_container)
 
 
-        # --- Section Réduction des Données (dans un conteneur) ---
-
-        # 1. On crée le widget conteneur
-        self.decimation_container = QWidget()
-        container_layout = QVBoxLayout(self.decimation_container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-
-        # 2. On ajoute les éléments existants au layout du conteneur
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        container_layout.addWidget(line)
-
-        label_decimation = QLabel("--- Réduction des Données (Décimation) ---")
-        label_decimation.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        container_layout.addWidget(label_decimation)
-
-        decimation_layout = QHBoxLayout()
-        decimation_layout.addWidget(QLabel("Garder 1 trace sur :"))
+        # --- Groupe 4 : Auto-Trim (Conteneur dynamique) ---
+        self.autotrim_container = QGroupBox("Découpage Auto")
+        trim_layout = QHBoxLayout(self.autotrim_container)
+        trim_layout.setContentsMargins(5, 5, 5, 5)
         
-        self.line_edit_decimation = QLineEdit(str(self.basalt.traitementValues.decimation_factor))
-        self.line_edit_decimation.setValidator(QIntValidator(1, 100)) 
-        self.line_edit_decimation.setToolTip("Ex: 2 pour garder une trace sur deux. 1 pour tout garder.")
-        self.line_edit_decimation.editingFinished.connect(self.on_decimation_edited)
-        decimation_layout.addWidget(self.line_edit_decimation)
-        container_layout.addLayout(decimation_layout)
-
-        # 3. On ajoute le conteneur entier au layout principal de la page "Options"
-        options_layout.addWidget(self.decimation_container)
-
-        # --- Section Auto-Trim (dans un conteneur) ---
-        self.autotrim_container = QWidget()
-        trim_layout = QVBoxLayout(self.autotrim_container)
-        trim_layout.setContentsMargins(0, 0, 0, 0)
-
-        line_trim = QFrame()
-        line_trim.setFrameShape(QFrame.Shape.HLine)
-        line_trim.setFrameShadow(QFrame.Shadow.Sunken)
-        trim_layout.addWidget(line_trim)
-
-        label_trim = QLabel("--- Découpage Auto (Auto-Trim) ---")
-        label_trim.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        trim_layout.addWidget(label_trim)
-
-        trim_controls_layout = QHBoxLayout()
-        trim_controls_layout.addWidget(QLabel("Seuil (0-1):"))
-        
+        trim_layout.addWidget(QLabel("Seuil:"))
         self.line_edit_trim_threshold = QLineEdit("0.05")
+        self.line_edit_trim_threshold.setFixedWidth(50)
         self.line_edit_trim_threshold.setValidator(QDoubleValidator(0.0, 1.0, 3))
-        self.line_edit_trim_threshold.setToolTip("Sensibilité au mouvement. Plus bas = plus sensible.")
-        trim_controls_layout.addWidget(self.line_edit_trim_threshold)
+        trim_layout.addWidget(self.line_edit_trim_threshold)
         
-        self.btn_apply_autotrim = QPushButton("Détecter et Couper")
+        self.btn_apply_autotrim = QPushButton("Go")
         self.btn_apply_autotrim.clicked.connect(self.on_autotrim_clicked)
-        trim_controls_layout.addWidget(self.btn_apply_autotrim)
+        trim_layout.addWidget(self.btn_apply_autotrim)
         
-        trim_layout.addLayout(trim_controls_layout)
-        
-        # --- AJOUT : Case à cocher pour les annotations ---
-        line_ano = QFrame()
-        line_ano.setFrameShape(QFrame.Shape.HLine)
-        line_ano.setFrameShadow(QFrame.Shadow.Sunken)
-        options_layout.addWidget(line_ano)
-
-        # Création de l'attribut manquant
-        self.checkbox_show_annotations = QCheckBox("Afficher les annotations sur le graphique")
-        self.checkbox_show_annotations.setChecked(True) # Par défaut, on les voit
-        self.checkbox_show_annotations.stateChanged.connect(self.redraw_plot) # Redessine quand on clique
-        options_layout.addWidget(self.checkbox_show_annotations)
-        # --- FIN DE L'AJOUT ---
         options_layout.addWidget(self.autotrim_container)
+
+
+        # --- Groupe 5 : Divers ---
+        misc_group = QGroupBox("Divers")
+        misc_layout = QVBoxLayout()
+        misc_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.checkbox_show_annotations = QCheckBox("Afficher les annotations")
+        self.checkbox_show_annotations.setChecked(True)
+        self.checkbox_show_annotations.stateChanged.connect(self.redraw_plot)
+        misc_layout.addWidget(self.checkbox_show_annotations)
+        
+        misc_group.setLayout(misc_layout)
+        options_layout.addWidget(misc_group)
+
+
+        # --- STRETCH FINAL (CRUCIAL) ---
+        # C'est lui qui pousse tout vers le haut
+        options_layout.addStretch()
+
         return options_widget
 
     def _get_current_file_list(self) -> list[Path]:
@@ -2064,18 +2320,18 @@ class MainWindow():
 
     def on_mouse_move(self, event):
         """
-        Gère les événements de mouvement de la souris, met à jour les coordonnées (X, Y)
-        et l'amplitude (A), ainsi que le graphique de la trace.
+        Gère les événements de mouvement de la souris.
+        Affiche X/Y (physique), Trace/Sample (indices) et Amplitude.
         """
-        # Si aucun fichier n'est chargé ou si la souris est en dehors des axes du radargramme
+        # Si aucun fichier n'est chargé ou si la souris est en dehors des axes
         if event.inaxes is not self.ax or self.basalt.traitement is None or self.basalt.traitement.data.size == 0:
             self.coord_label.setText("X: -- | Y: -- | A: --")
             return
 
-        # 1. Récupération des coordonnées X et Y de la souris (inchangé)
+        # 1. Récupération des coordonnées physiques
         x_coord, y_coord = event.xdata, event.ydata
         
-        # 2. Conversion des coordonnées en indices de tableau [ligne, colonne]
+        # 2. Conversion en indices de tableau [ligne, colonne]
         data = self.basalt.traitement.data
         num_samples, num_traces = data.shape
         
@@ -2083,45 +2339,50 @@ class MainWindow():
         if plot_extent is None: return
 
         x_axis_start, x_axis_end = plot_extent[0], plot_extent[1]
-        y_axis_top, y_axis_bottom = plot_extent[3], plot_extent[2] # Inversé: top=min, bottom=max
+        y_axis_top, y_axis_bottom = plot_extent[3], plot_extent[2] # Attention : l'axe Y est souvent inversé en affichage
 
-        # Calcul de l'indice de la trace (colonne)
+        # Calcul de l'indice X (Trace)
         trace_idx = 0
         x_range = x_axis_end - x_axis_start
-        if x_range > 0:
+        if abs(x_range) > 1e-9: # Évite la division par zéro
             relative_pos_x = (x_coord - x_axis_start) / x_range
             trace_idx = int(relative_pos_x * (num_traces - 1))
 
-        # Calcul de l'indice du sample (ligne)
+        # Calcul de l'indice Y (Sample)
         sample_idx = 0
         y_range = y_axis_bottom - y_axis_top
-        if y_range > 0:
+        if abs(y_range) > 1e-9:
             relative_pos_y = (y_coord - y_axis_top) / y_range
             sample_idx = int(relative_pos_y * (num_samples - 1))
 
-        # Sécurité pour les bords de l'image
+        # Sécurité pour rester dans les bornes du tableau
         trace_idx = max(0, min(trace_idx, num_traces - 1))
         sample_idx = max(0, min(sample_idx, num_samples - 1))
 
-        # 3. Récupération de l'amplitude à ces indices
+        # 3. Récupération de l'amplitude
         amplitude = data[sample_idx, trace_idx]
 
-        # 4. Mise à jour du label avec la nouvelle information d'amplitude (A)
-        coord_text = f"X: {x_coord:.2f} | Y: {y_coord:.2f} | A: {amplitude}"
-        self.coord_label.setText(coord_text)
+        # --- MODIFICATION ICI : Affichage enrichi ---
+        # On ajoute [Tr: ...] pour la trace et [Smp: ...] pour le sample
+        coord_text = (f"X: {x_coord:.2f} [Tr: {trace_idx}] | "
+                      f"Y: {y_coord:.2f} [Smp: {sample_idx}] | "
+                      f"A: {amplitude:.0f}")
         
-        # La mise à jour de l'A-Scan (graphique de droite) reste fonctionnelle
+        self.coord_label.setText(coord_text)
+        # --------------------------------------------
+        
+        # Mise à jour de l'A-Scan (graphique de droite)
         trace_data = data[:, trace_idx]
         y_values = np.linspace(y_axis_top, y_axis_bottom, num=num_samples)
         
         self.trace_plot.plot_trace(
-                    trace_data, 
-                    y_values, 
-                    xlabel="Amplitude", 
-                    ylabel=ylabel, 
-                    y_cursor_pos=y_coord,
-                    x_cursor_pos=amplitude  # <-- On ajoute la position en amplitude
-                )
+            trace_data, 
+            y_values, 
+            xlabel="Amplitude", 
+            ylabel=ylabel, 
+            y_cursor_pos=y_coord,
+            x_cursor_pos=amplitude 
+        )
 
     def on_contrast_slider_changed(self, value):
         """Gère le changement de valeur du slider de contraste."""
