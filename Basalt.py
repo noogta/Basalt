@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import QProgressDialog # Pour la barre de chargement
 
 
 import sys
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog, QGridLayout, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton,QDialog, QFormLayout, QDialogButtonBox
 from PyQt6.QtGui import QAction, QFont, QIntValidator
 from PyQt6.QtGui import QDoubleValidator
@@ -690,28 +690,31 @@ class CScanWindow(QWidget):
         super().closeEvent(event)
 
 class MainWindow():
-   
     def __init__(self, softwarename: str):
         
         self.constante = Const()
 
-        # 1. Création de la fenêtre principale
+        # 1. Create the main window
         self.app = QApplication(sys.argv)
         self.window = QMainWindow()
         self.window.setWindowTitle(softwarename)
         
-        # 2. Initialisation des variables d'état (CRUCIAL pour éviter les plantages)
+        # 2. Initialize state variables (CRUCIAL to avoid crashes)
         self.basalt : Basalt = Basalt()
         self.is_simplified_mode = False
         self.manual_gain_widgets = []
-        self.cscan_window = None    # Évite le crash si on clique sur C-Scan trop vite
-        self.drawing_mode = None    # Évite le crash au clic sur le graph
-        self.box_start_pos = None   # Pour le dessin manuel (si besoin)
+        self.cscan_window = None    # Prevents crash if clicking C-Scan too fast
+        self.drawing_mode = None    # Prevents crash on graph click
+        self.box_start_pos = None   # For manual drawing (if needed)
 
-        self.temp_layer_points = [] # Pour stocker les points en cours de tracé
-        self.temp_layer_line = None # L'objet visuel temporaire (la ligne qui se dessine)
+        self.temp_layer_points = [] # To store points currently being drawn
+        self.temp_layer_line = None # The temporary visual object (the line being drawn)
+        
+        # --- ADDED: The lock variable ---
+        self.is_processing_layer_validation = False
+        # --------------------------------
 
-        # 3. Gestion des paramètres (Geometry, Last folder...)
+        # 3. Parameter Management (Geometry, Last folder...)
         self.window.setGeometry(100, 100, 1600, 900)
         settings = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
 
@@ -723,71 +726,70 @@ class MainWindow():
         self.basalt.last_used_folder = last_folder
         last_extension = settings.value("last_extension_filter", self.constante.ext_list[0])
 
-        # 4. Configuration de l'interface principale (Layouts)
+        # 4. Main Interface Configuration (Layouts)
         self.window.central_widget = QWidget()
         self.window.setCentralWidget(self.window.central_widget)
         self.main_layout = QHBoxLayout(self.window.central_widget)
 
-        # --- PANNEAU GAUCHE (Contrôles) ---
+        # --- LEFT PANEL (Controls) ---
         self.control_panel_widget = QWidget()
         self.control_layout = QVBoxLayout(self.control_panel_widget)
         self.control_panel_widget.setFixedWidth(350)
         
-        # Construction du contenu du panneau gauche
+        # Build left panel content
         self.init_ui() 
         
-        # On restaure l'extension après avoir créé l'interface
+        # Restore extension after UI creation
         self.combo_box_extension.setCurrentText(last_extension)
         
-        # Construction du menu
+        # Build menu
         self.menu()
 
-        # --- PANNEAU DROIT (Graphiques) ---
+        # --- RIGHT PANEL (Graphs) ---
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # A. Radargramme (Gauche du splitter)
+        # A. Radargram (Left of splitter)
         self.fig = Figure(figsize=(12, 10), dpi=100)
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111)
         self.radargramme = Graphique(self.ax, self.fig)
 
-        # B. A-Scan (Droite du splitter)
+        # B. A-Scan (Right of splitter)
         self.trace_fig = Figure(figsize=(4, 10), dpi=100)
         self.trace_fig.tight_layout() 
         self.trace_canvas = FigureCanvas(self.trace_fig)
         self.trace_ax = self.trace_fig.add_subplot(111)
         self.trace_plot = Graphique(self.trace_ax, self.trace_fig)
 
-        # Assemblage du Splitter
+        # Assemble Splitter
         self.splitter.addWidget(self.canvas)
         self.splitter.addWidget(self.trace_canvas)
         self.splitter.setStretchFactor(0, 4)
         self.splitter.setStretchFactor(1, 1)
 
-        # Assemblage final de la fenêtre
+        # Final Window Assembly
         self.main_layout.addWidget(self.control_panel_widget)
         self.main_layout.addWidget(self.splitter)
 
-        # 5. Connexions des événements et Outils interactifs
+        # 5. Event Connections and Interactive Tools
         self.window.closeEvent = self.closeEvent
         
-        # Souris
+        # Mouse
         self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
         self.canvas.mpl_connect('button_press_event', self.on_mouse_click)
         self.canvas.mpl_connect('button_release_event', self.on_mouse_release)
         
-        # Outil RectangleSelector (pour les zones)
-        # Il est créé ici mais désactivé par défaut (set_active(False))
+        # RectangleSelector Tool (for zones)
+        # Created here but disabled by default (set_active(False))
         self.rs = RectangleSelector(self.ax, self.on_select_box_finished,
                                     useblit=True,
-                                    button=[1], # Clic gauche uniquement
+                                    button=[1], # Left click only
                                     minspanx=5, minspany=5,
                                     spancoords='pixels',
                                     interactive=True,
                                     props=dict(facecolor='red', edgecolor='black', alpha=0.2, fill=True))
         
         self.rs.set_active(False)
-
 
     def get_snapped_point(self, x_mouse, y_mouse):
         """Trouve le pic d'amplitude le plus proche verticalement."""
@@ -822,7 +824,6 @@ class MainWindow():
         # Reconversion indice -> coordonnée
         y_snapped = y_min + (best_y_idx / (h-1)) * (y_max - y_min)
         return x_mouse, y_snapped
-  
 
     def closeEvent(self, event):
         """
@@ -849,45 +850,48 @@ class MainWindow():
         sys.exit(self.app.exec())
 
     def _reset_temp_drawing(self):
-        """Nettoie les tracés temporaires (ligne jaune) si on change d'outil."""
+        """Nettoie les tracés temporaires (ligne jaune) et réinitialise la liste."""
         self.temp_layer_points = []
+        
+        # Si une ligne est en cours d'affichage, on l'efface
         if self.temp_layer_line:
-            try: self.temp_layer_line.remove()
-            except: pass
+            try: 
+                self.temp_layer_line.remove()
+            except ValueError: 
+                pass # Déjà supprimée, on ignore
             self.temp_layer_line = None
+            
         self.canvas.draw_idle()
 
     def on_tool_point_clicked(self):
         """Active le mode Point."""
-        # Si on active ce bouton...
         if self.btn_add_point.isChecked():
-            # 1. On décoche les autres
+            # On désactive les DEUX autres
             self.btn_add_box.setChecked(False)
-            self.btn_add_layer.setChecked(False) # <--- C'était manquant
+            self.btn_add_layer.setChecked(False) 
             
-            # 2. On nettoie les autres outils
+            # Reset des outils
             self.rs.set_active(False)
             self._reset_temp_drawing()
             
-            # 3. On active le mode
             self.drawing_mode = "point"
-            self.lbl_instruction.setText("Cliquez sur le graphique pour ajouter un POINT.")
+            self.lbl_instruction.setText("Cliquez pour ajouter un POINT.")
         else:
-            # Si on le décoche
             self.drawing_mode = None
             self.lbl_instruction.setText("Aucun outil sélectionné.")
 
     def on_tool_box_clicked(self):
         """Active le mode Zone."""
         if self.btn_add_box.isChecked():
+            # On désactive les DEUX autres
             self.btn_add_point.setChecked(False)
-            self.btn_add_layer.setChecked(False) # <--- C'était manquant
+            self.btn_add_layer.setChecked(False)
             
             self._reset_temp_drawing()
-            self.rs.set_active(True) # Active le sélecteur de zone
+            self.rs.set_active(True) # Active le RectangleSelector
             
             self.drawing_mode = "box"
-            self.lbl_instruction.setText("Cliquez et glissez pour dessiner une ZONE.")
+            self.lbl_instruction.setText("Glissez pour créer une ZONE.")
         else:
             self.rs.set_active(False)
             self.drawing_mode = None
@@ -895,18 +899,14 @@ class MainWindow():
 
     def on_tool_layer_clicked(self):
         """Active le mode Interface (Couche)."""
-        is_checked = self.btn_add_layer.isChecked()
-
-        if is_checked:
-            # 1. On désactive les AUTRES boutons
+        if self.btn_add_layer.isChecked():
+            # On désactive les DEUX autres
             self.btn_add_point.setChecked(False)
             self.btn_add_box.setChecked(False)
             
-            # 2. On désactive les outils des autres modes
             self.rs.set_active(False)
             self._reset_temp_drawing()
             
-            # 3. Mode
             self.drawing_mode = "layer"
             self.lbl_instruction.setText("Clic G: Point | Clic Droit/Entrée: Finir")
         else:
@@ -915,22 +915,29 @@ class MainWindow():
             self.lbl_instruction.setText("Aucun outil sélectionné.")
 
     def on_delete_pick_clicked(self):
-        """Supprime l'annotation sélectionnée (Point ou Zone)."""
+        """Supprime l'annotation sélectionnée (Point, Zone ou Interface)."""
         selected_items = self.picks_list_widget.selectedItems()
         if not selected_items: return
         
         row = self.picks_list_widget.row(selected_items[0])
         
-        # On détermine si c'est un point ou une boîte en fonction de la liste
-        # Astuce : On regarde d'abord les points, puis les boîtes
         num_points = len(self.basalt.current_picks)
+        num_boxes = len(self.basalt.current_boxes)
         
+        # Logique de détection du type en fonction de la position dans la liste
         if row < num_points:
+            # C'est un Point
             self.basalt.delete_pick(row)
-        else:
-            # C'est une boîte (l'index est décalé)
+            
+        elif row < (num_points + num_boxes):
+            # C'est une Zone (il faut soustraire le nombre de points pour avoir l'index local)
             self.basalt.delete_box(row - num_points)
             
+        else:
+            # C'est une Interface
+            self.basalt.delete_layer(row - num_points - num_boxes)
+            
+        # On rafraîchit tout
         self._update_annotation_list()
         self.redraw_plot()
 
@@ -952,65 +959,103 @@ class MainWindow():
         # 2. Ajouter les boîtes
         for b in self.basalt.current_boxes:
             self.picks_list_widget.addItem(f"[ZONE] {b.label} ({b.color})")
+        # 3. Ajouter les interfaces 
+        for l in self.basalt.current_layers:
+            # On affiche le label et la couleur
+            self.picks_list_widget.addItem(f"[INTERFACE] {l.label} ({l.color})")
+
+    def _finish_layer_drawing_process(self):
+        """
+        Gère l'ouverture de la fenêtre et la sauvegarde.
+        Blindé contre les blocages.
+        """
+        print("Exécution de la validation...")
+        try:
+            # 1. Ouverture du dialogue (Bloquant)
+            d = AnnotationDialog(self.window, "Nouvelle Interface")
+            if d.exec():
+                lbl, col = d.get_data()
+                # Sauvegarde
+                self.basalt.add_layer(LayerAnnotation(self.temp_layer_points, lbl, col))
+                self._update_annotation_list()
+            
+        except Exception as e:
+            print(f"Erreur critique validation : {e}")
+
+        finally:
+            # --- CE BLOC S'EXÉCUTE TOUJOURS ---
+            print("Nettoyage final et déblocage.")
+            
+            # 1. Nettoyage graphique
+            self.temp_layer_points = []
+            if self.temp_layer_line: 
+                try: self.temp_layer_line.remove()
+                except: pass
+                self.temp_layer_line = None
+
+            # 2. Réinitialisation des boutons (silencieusement)
+            self.btn_add_layer.blockSignals(True)
+            self.btn_add_layer.setChecked(False)
+            self.btn_add_layer.blockSignals(False)
+
+            # 3. DÉBLOCAGE DU MODE
+            self.drawing_mode = None
+            self.lbl_instruction.setText("Aucun outil sélectionné.")
+            
+            # 4. Force le traitement des événements en attente
+            QApplication.processEvents()
+            
+            # 5. Redessin final
+            self.redraw_plot()
 
     def on_mouse_click(self, event):
         if event.inaxes is not self.ax: return
+        if self.drawing_mode == "busy": return
 
-        # MODE POINT
+        # --- MODE POINT (Clic Gauche) ---
         if self.drawing_mode == "point" and event.button == 1:
-            # Snap optionnel pour le point aussi !
             x, y = self.get_snapped_point(event.xdata, event.ydata)
-            
             d = AnnotationDialog(self.window, "Point")
             if d.exec():
                 lbl, col = d.get_data()
-                self.basalt.add_pick(Pick(lbl, x, y, col)) # Pick a maintenant 'color'
+                self.basalt.add_pick(Pick(lbl, x, y, col))
                 self._update_annotation_list()
                 self.redraw_plot()
 
-        # MODE LAYER (INTERFACE)
-        elif self.drawing_mode == "layer":
-            # Clic Gauche : Ajout point
-            if event.button == 1:
-                x, y = self.get_snapped_point(event.xdata, event.ydata)
-                self.temp_layer_points.append((x, y))
-                
-                # Dessin temporaire (ligne jaune)
-                if self.temp_layer_line: self.temp_layer_line.remove()
-                xs = [p[0] for p in self.temp_layer_points]
-                ys = [p[1] for p in self.temp_layer_points]
-                self.temp_layer_line, = self.ax.plot(xs, ys, 'y--o', linewidth=1)
-                self.canvas.draw()
-
-            # Clic Droit (3) ou Entrée : Finir
-            elif event.button == 3 or event.key == 'enter':
-                if len(self.temp_layer_points) > 1:
-                    d = AnnotationDialog(self.window, "Interface")
-                    if d.exec():
-                        lbl, col = d.get_data()
-                        self.basalt.add_layer(LayerAnnotation(self.temp_layer_points, lbl, col))
-                        self._update_annotation_list()
-                        
-                # Nettoyage
-                self.temp_layer_points = []
-                if self.temp_layer_line: 
-                    self.temp_layer_line.remove()
-                    self.temp_layer_line = None
-                
-                # --- AJOUT : DÉSACTIVATION AUTOMATIQUE DU MODE ---
-                self.btn_add_layer.setChecked(False) # On décoche le bouton visuellement
-                self.drawing_mode = None             # On coupe le mode interne
-                self.lbl_instruction.setText("Aucun outil sélectionné.")
-                # -------------------------------------------------
-                
-                self.redraw_plot()   
+        # --- MODE INTERFACE (Clic Gauche SEULEMENT) ---
+        elif self.drawing_mode == "layer" and event.button == 1:
+            # Ajout d'un point à la ligne
+            x, y = self.get_snapped_point(event.xdata, event.ydata)
+            self.temp_layer_points.append((x, y))
+            
+            if self.temp_layer_line: 
+                try: self.temp_layer_line.remove()
+                except: pass
+            
+            xs = [p[0] for p in self.temp_layer_points]
+            ys = [p[1] for p in self.temp_layer_points]
+            self.temp_layer_line, = self.ax.plot(xs, ys, 'y--o', linewidth=1.5)
+            self.canvas.draw_idle()
 
     def on_mouse_release(self, event):
-            """
-            Obsolète : La gestion du relâchement pour les zones est maintenant
-            gérée par RectangleSelector (self.rs).
-            """
-            pass
+        """Gère le relâchement de la souris (Fin du tracé d'interface)."""
+        
+        # On vérifie qu'on est bien en mode Layer et que c'est un Clic Droit (3)
+        # Note : event.button peut être None si le relâchement est hors zone, on vérifie.
+        if self.drawing_mode == "layer" and event.button == 3:
+            
+            if len(self.temp_layer_points) < 2: 
+                return
+
+            print("Relâchement clic droit détecté -> Validation.")
+            
+            # 1. On passe en mode occupé pour bloquer d'autres clics
+            self.drawing_mode = "busy"
+            
+            # 2. On lance la validation avec un timer très court
+            # Le timer permet à la boucle d'événement Qt de finir le traitement du "Release"
+            # avant d'ouvrir la popup.
+            QTimer.singleShot(10, self._finish_layer_drawing_process)
 
     def on_select_box_finished(self, eclick, erelease):
         """Appelé automatiquement par RectangleSelector quand on relâche la souris."""
@@ -1050,6 +1095,7 @@ class MainWindow():
             # On réinitialise l'outil pour effacer le fantôme visuel
             self.rs.set_visible(True)
             self.rs.set_active(False)
+            self.is_processing_layer_validation = False
             self.rs.set_active(True)
             self.redraw_plot()
 
@@ -1321,7 +1367,6 @@ class MainWindow():
         #----------------------------
         # Ajoutez un espaceur pour pousser les éléments vers le haut si nécessaire
         self.control_layout.addStretch()
-
 
     def on_simplified_mode_toggled(self, checked: bool):
         """Gère le changement d'état du mode simplifié."""
@@ -2160,6 +2205,7 @@ class MainWindow():
             self.line_edit_xlim.setPlaceholderText(f"Max: {header.value_trace}")
             self.line_edit_ylim.setPlaceholderText(f"Max: {header.value_sample}")
 
+            self._update_annotation_list()
             # 6. On force la re-lecture des valeurs de l'UI pour les appliquer au nouveau fichier
             self.on_x0_edited()
             self.on_xlim_edited()
@@ -2846,11 +2892,16 @@ class Basalt():
 
         self.epsilon :float = 8 
 
-        self.current_picks: list = []
-        self.all_boxes: dict[str, list] = {}
-        self.current_boxes: list = []
-        self.all_layers: dict[str, list] = {}
-        self.current_layers: list = []
+        # --- AJOUT : Initialisation des conteneurs d'annotations ---
+        self.all_picks: dict[str, list] = {}   # Dictionnaire global des points
+        self.current_picks: list = []          # Liste des points du fichier actuel
+        
+        self.all_boxes: dict[str, list] = {}   # Dictionnaire global des zones
+        self.current_boxes: list = []          # Liste des zones du fichier actuel
+        
+        self.all_layers: dict[str, list] = {}  # Dictionnaire global des interfaces
+        self.current_layers: list = []         # Liste des interfaces du fichier actuel
+        # -----------------------------------------------------------
 
         self.current_file_index: int = 0
 
@@ -2865,7 +2916,6 @@ class Basalt():
             if self.selectedFile:
                 self.all_layers[self.selectedFile.stem] = self.current_layers
 
-    # Mettez à jour load_annotations_for_current_file
     def load_annotations_for_current_file(self):
         if self.selectedFile:
             filename = self.selectedFile.stem
@@ -2958,40 +3008,97 @@ class Basalt():
         self.traitementValues.sampling_freq = fs_hz
         print(f"Fréquence d'échantillonnage détectée : {fs_hz / 1e6:.2f} MHz")
 
+        self.load_annotations_for_current_file()
+
     def save_processing_settings(self, filepath: str):
-        """Sauvegarde l'objet traitementValues dans un fichier JSON."""
+        """Sauvegarde les paramètres ET les annotations dans un fichier JSON."""
         try:
+            data_to_save = {}
+            
+            # 1. Sauvegarde des paramètres de traitement
+            data_to_save['settings'] = asdict(self.traitementValues)
+            data_to_save['data_folder'] = self.folder
+            
+            # 2. Sauvegarde des annotations (Conversion en dictionnaires)
+            # On convertit les objets (Pick, Box...) en dict via asdict pour le JSON
+            annotations = {}
+            
+            # On parcourt tous les fichiers qui ont des annotations
+            all_files = set(self.all_picks.keys()) | set(self.all_boxes.keys()) | set(self.all_layers.keys())
+            
+            for filename in all_files:
+                file_annos = {
+                    'picks': [asdict(p) for p in self.all_picks.get(filename, [])],
+                    'boxes': [asdict(b) for b in self.all_boxes.get(filename, [])],
+                    'layers': [asdict(l) for l in self.all_layers.get(filename, [])]
+                }
+                annotations[filename] = file_annos
+            
+            data_to_save['annotations'] = annotations
+
+            # Écriture du fichier
             with open(filepath, 'w') as f:
-                # asdict convertit la dataclass en un dictionnaire simple
-                settings_dict = asdict(self.traitementValues)
-                #Chemin du dossier en cours
-                settings_dict['data_folder'] = self.folder
-                # json.dump écrit le dictionnaire dans le fichier
-                json.dump(settings_dict, f, indent=4)
-            print(f"Paramètres sauvegardés avec succès dans {filepath}")
+                json.dump(data_to_save, f, indent=4)
+                
+            print(f"Projet sauvegardé avec succès dans {filepath}")
+            
         except Exception as e:
-            print(f"Erreur lors de la sauvegarde des paramètres : {e}")
+            print(f"Erreur lors de la sauvegarde : {e}")
 
     def load_processing_settings(self, filepath: str):
-        """Charge les paramètres depuis un fichier JSON et met à jour traitementValues."""
+        """Charge les paramètres et reconstruit les objets d'annotations."""
         try:
             with open(filepath, 'r') as f:
-                settings_dict = json.load(f)
+                data_loaded = json.load(f)
             
-            folder_path = settings_dict.pop('data_folder', None)
-            if folder_path and os.path.isdir(folder_path):
-                self.setFolder(folder_path)
+            # A. Chargement des paramètres de traitement
+            # On gère la rétro-compatibilité (si l'ancien format sans clé 'settings' est utilisé)
+            if 'settings' in data_loaded:
+                settings_dict = data_loaded['settings']
+                folder = data_loaded.get('data_folder', None)
+            else:
+                settings_dict = data_loaded # Ancien format
+                folder = settings_dict.pop('data_folder', None)
 
-            # On met à jour l'objet existant avec les valeurs du fichier
+            if folder and os.path.isdir(folder):
+                self.setFolder(folder)
+
             for key, value in settings_dict.items():
                 if hasattr(self.traitementValues, key):
                     setattr(self.traitementValues, key, value)
-            print(f"Paramètres chargés avec succès depuis {filepath}")
-            return True
-        except Exception as e:
-            print(f"Erreur lors du chargement des paramètres : {e}")
-            return False
 
+            # B. Chargement des Annotations (Reconstruction des Objets)
+            if 'annotations' in data_loaded:
+                self.all_picks = {}
+                self.all_boxes = {}
+                self.all_layers = {}
+                
+                for filename, annos in data_loaded['annotations'].items():
+                    # 1. Reconstruction des Points
+                    self.all_picks[filename] = [Pick(**p) for p in annos.get('picks', [])]
+                    
+                    # 2. Reconstruction des Zones
+                    self.all_boxes[filename] = [BoxAnnotation(**b) for b in annos.get('boxes', [])]
+                    
+                    # 3. Reconstruction des Interfaces
+                    # Attention : JSON convertit les tuples en listes. LayerAnnotation attend une liste de listes/tuples.
+                    # Pick(**l) fonctionne car les clés du dict correspondent aux arguments de __init__
+                    self.all_layers[filename] = [LayerAnnotation(**l) for l in annos.get('layers', [])]
+                
+                print(f"Annotations chargées pour {len(data_loaded['annotations'])} fichiers.")
+                
+                # Si un fichier est déjà sélectionné, on met à jour ses annotations courantes immédiatement
+                self.load_annotations_for_current_file()
+
+            print(f"Paramètres chargés depuis {filepath}")
+            return True
+            
+        except Exception as e:
+            print(f"Erreur lors du chargement : {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
     def traitementScan(self): ## problème : a chaque changement besoin de repasser par ici (traitement, epsilon, tout ça tout ça)
         """
             Applique tous les gains, filtre, et cut sur le tableau brute
@@ -3137,12 +3244,11 @@ class Basalt():
         print(f"T0 automatiquement détecté à l'échantillon RELATIF : {t0_sample}")
         return t0_sample
 
-
-
     def add_pick(self, pick: Pick):
         """Ajoute un point à la liste du fichier courant."""
         if self.selectedFile:
             self.current_picks.append(pick)
+            self.all_picks[self.selectedFile.stem] = self.current_picks
             # On utilise le nom du fichier comme clé pour stocker les annotations
             # (Vous pouvez aussi utiliser self.all_picks si vous l'avez défini)
 
@@ -3150,31 +3256,75 @@ class Basalt():
         """Supprime un point par son index."""
         if 0 <= index < len(self.current_picks):
             del self.current_picks[index]
+            if self.selectedFile:
+                self.all_picks[self.selectedFile.stem] = self.current_picks
 
     def export_picks_to_csv(self, filepath: str):
-        """Exporte TOUT (Points, Zones, Interfaces)."""
+        """
+        Exporte TOUT (Points, Zones, Interfaces) avec les Amplitudes réelles.
+        """
         import csv
         try:
+            # 1. Préparation des données pour lire l'amplitude
+            data = self.traitement.data if self.traitement else None
+            extent = None
+            
+            if data is not None:
+                h, w = data.shape
+                # On récupère les bornes physiques pour faire la conversion inverse
+                # extent = [x_min, x_max, y_max, y_min] (Attention : y_min est en haut sur le plot)
+                extent, _, _ = self.get_plot_axes_parameters()
+            
+            # Fonction locale pour convertir (X,Y physique) -> (Amplitude)
+            def get_amp(x, y):
+                if data is None or extent is None: return "N/A"
+                x_min, x_max, y_max, y_min = extent
+                
+                try:
+                    # Calcul des indices (règle de trois)
+                    # Évite la division par zéro
+                    if abs(x_max - x_min) < 1e-9 or abs(y_max - y_min) < 1e-9: 
+                        return "N/A"
+                    
+                    # Conversion
+                    ix = int((x - x_min) / (x_max - x_min) * (w - 1))
+                    iy = int((y - y_min) / (y_max - y_min) * (h - 1))
+                    
+                    # Sécurité bornes
+                    ix = max(0, min(ix, w - 1))
+                    iy = max(0, min(iy, h - 1))
+                    
+                    return float(data[iy, ix])
+                except:
+                    return "Err"
+
+            # 2. Écriture du fichier
             with open(filepath, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['Type', 'Label', 'X (m)', 'Y (Prof)', 'Color'])
+                # En-tête enrichi
+                writer.writerow(['Type', 'Label', 'X (m)', 'Y (Prof)', 'Amplitude', 'Color'])
                 
+                # A. Points
                 for p in self.current_picks:
-                    writer.writerow(['Point', p.label, p.x, p.y, p.color])
+                    amp = get_amp(p.x, p.y)
+                    writer.writerow(['Point', p.label, p.x, p.y, amp, p.color])
                 
+                # B. Zones (Pas d'amplitude unique pour une zone)
                 for b in self.current_boxes:
-                    writer.writerow(['Zone', b.label, f"{b.x_min}-{b.x_max}", f"{b.y_min}-{b.y_max}", b.color])
+                    writer.writerow(['Zone', b.label, f"{b.x_min:.2f}-{b.x_max:.2f}", f"{b.y_min:.2f}-{b.y_max:.2f}", "", b.color])
 
+                # C. Interfaces (Layers)
                 for l in self.current_layers:
-                    # On exporte chaque point de la ligne
                     for i, (lx, ly) in enumerate(l.points):
-                        lbl = l.label if i == 0 else ""
-                        writer.writerow(['Interface', lbl, lx, ly, l.color])
+                        # On met le label sur la première ligne, ou on ajoute un suffixe _pt{i}
+                        lbl_row = l.label if i == 0 else f"{l.label}_pt{i}"
+                        amp = get_amp(lx, ly)
+                        writer.writerow(['Interface', lbl_row, lx, ly, amp, l.color])
                         
             print(f"Export réussi : {filepath}")
+            
         except Exception as e:
-            print(f"Erreur export : {e}")
-
+            print(f"Erreur export CSV : {e}")
 
     def detect_static_bounds(self, threshold: float = 0.05, debug: bool = True): # <--- Ajout de debug=True
         """
