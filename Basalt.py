@@ -1,4 +1,7 @@
 import numpy as np
+from skimage.graph import route_through_array
+from skimage.transform import resize
+
 import os
 import re
 import math 
@@ -30,7 +33,7 @@ from PyQt6.QtWidgets import QProgressDialog # Pour la barre de chargement
 import sys
 from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog, QGridLayout, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton,QDialog, QFormLayout, QDialogButtonBox
-from PyQt6.QtGui import QAction, QFont, QIntValidator
+from PyQt6.QtGui import QAction, QFont, QIntValidator, QIcon
 from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtGui import QDoubleValidator, QValidator
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -709,7 +712,8 @@ class MainWindow():
 
         self.temp_layer_points = [] # To store points currently being drawn
         self.temp_layer_line = None # The temporary visual object (the line being drawn)
-        
+        self.autotrack_start_point = None # Pour stocker le 1er clic (x, y)
+
         # --- ADDED: The lock variable ---
         self.is_processing_layer_validation = False
         # --------------------------------
@@ -1037,6 +1041,125 @@ class MainWindow():
             self.temp_layer_line, = self.ax.plot(xs, ys, 'y--o', linewidth=1.5)
             self.canvas.draw_idle()
 
+        # --- NOUVEAU : MODE AUTO-TRACK (Clic Gauche) ---
+        elif self.drawing_mode == "autotrack" and event.button == 1:
+            # On utilise le snap pour être bien sur un pic au départ et à l'arrivée
+            x_snap, y_snap = self.get_snapped_point(event.xdata, event.ydata)
+            
+            if self.autotrack_start_point is None:
+                # --- PREMIER CLIC (DÉPART) ---
+                self.autotrack_start_point = (x_snap, y_snap)
+                self.lbl_instruction.setText("AUTO-TRACK : Cliquez maintenant sur le point d'ARRIVÉE.")
+                # Petit feedback visuel temporaire (un point rouge)
+                self.temp_layer_line, = self.ax.plot([x_snap], [y_snap], 'ro', markersize=8)
+                self.canvas.draw_idle()
+            else:
+                # --- SECOND CLIC (ARRIVÉE) + CALCUL ---
+                self.lbl_instruction.setText("Calcul du chemin en cours...")
+                QApplication.processEvents() # Force l'affichage du message
+                
+                # Lancement du calcul (Voir la méthode suivante)
+                path_points = self.perform_autotracking(self.autotrack_start_point, (x_snap, y_snap))
+                
+                if path_points:
+                    # On ajoute les points calculés à la liste temporaire
+                    self.temp_layer_points.extend(path_points)
+                    
+                    # Mise à jour du tracé jaune
+                    if self.temp_layer_line:
+                         try: self.temp_layer_line.remove()
+                         except:pass
+                    xs = [p[0] for p in self.temp_layer_points]
+                    ys = [p[1] for p in self.temp_layer_points]
+                    self.temp_layer_line, = self.ax.plot(xs, ys, 'y-', linewidth=2) # y- pour une ligne continue
+                    self.canvas.draw_idle()
+                    
+                    # On bascule automatiquement en mode "layer" normal pour permettre
+                    # à l'utilisateur de continuer manuellement ou de valider (clic droit)
+                    self.drawing_mode = "layer"
+                    self.btn_autotrack.setChecked(False)
+                    self.btn_add_layer.setChecked(True)
+                    self.lbl_instruction.setText("Chemin tracé. Continuez manuellement (Clic G) ou validez (Clic D).")
+                
+                # Reset pour le prochain usage
+                self.autotrack_start_point = None
+
+    def perform_autotracking(self, start_pt_phys, end_pt_phys):
+        """
+        Calcule le chemin optimal entre deux points physiques en suivant l'amplitude.
+        """
+        if self.basalt.traitement is None or self.basalt.traitement.data is None:
+            print("Erreur Auto-Track : Pas de données.")
+            return []
+
+        try:
+            # 1. Préparation des données
+            # On récupère les données brutes traitées
+            data = self.basalt.traitement.data
+            
+            # --- CORRECTION : Calcul de l'enveloppe à la volée ---
+            # L'enveloppe (Hilbert) est bien meilleure pour le suivi que les données brutes oscillantes
+            from scipy.signal import hilbert
+            analytic_signal = hilbert(data, axis=0)
+            data_matrix = np.abs(analytic_signal)
+            # -----------------------------------------------------
+
+            h_pixels, w_pixels = data_matrix.shape
+            extent, _, _ = self.basalt.get_plot_axes_parameters()
+            x_min, x_max, y_max, y_min = extent 
+
+            # 2. Fonction utilitaire de conversion Physique -> Indice
+            def phys_to_idx(x_p, y_p):
+                # Protection contre la division par zéro
+                if abs(x_max - x_min) < 1e-9: return 0, 0
+                if abs(y_max - y_min) < 1e-9: return 0, 0
+
+                ix = int((x_p - x_min) / (x_max - x_min) * (w_pixels - 1))
+                iy = int((y_p - y_min) / (y_max - y_min) * (h_pixels - 1))
+                
+                ix = max(0, min(ix, w_pixels - 1))
+                iy = max(0, min(iy, h_pixels - 1))
+                return iy, ix # (Ligne, Colonne)
+
+            # 3. Conversion des points
+            start_idx = phys_to_idx(start_pt_phys[0], start_pt_phys[1])
+            end_idx = phys_to_idx(end_pt_phys[0], end_pt_phys[1])
+
+            # 4. Création de la carte de coût
+            # Normalisation 0-1
+            d_min, d_max = np.min(data_matrix), np.max(data_matrix)
+            if abs(d_max - d_min) < 1e-9: return []
+            
+            normalized_data = (data_matrix - d_min) / (d_max - d_min)
+            
+            # Inversion : Coût faible = Forte amplitude
+            cost_matrix = 1.0 - normalized_data + 1e-5
+
+            # 5. Calcul du chemin (Dijkstra)
+            # Note : geometric=True permet les diagonales
+            indices_path, weight = route_through_array(cost_matrix, start_idx, end_idx, geometric=True)
+            
+            if not indices_path or len(indices_path) == 0:
+                 print("Auto-Track : Aucun chemin trouvé.")
+                 return []
+
+            # 6. Conversion inverse : Indices -> Physique
+            physical_path = []
+            
+            # On garde tous les points pour la fluidité
+            for iy, ix in indices_path:
+                x_p = x_min + (ix / (w_pixels - 1)) * (x_max - x_min)
+                y_p = y_min + (iy / (h_pixels - 1)) * (y_max - y_min)
+                physical_path.append((x_p, y_p))
+                
+            print(f"Auto-Track : {len(physical_path)} points générés.")
+            return physical_path
+
+        except Exception as e:
+            print(f"Erreur critique Auto-Track : {e}")
+            # En cas d'erreur, on retourne une liste vide pour ne pas planter l'interface
+            return []
+        
     def on_mouse_release(self, event):
         """Gère le relâchement de la souris (Fin du tracé d'interface)."""
         
@@ -1099,6 +1222,28 @@ class MainWindow():
             self.rs.set_active(True)
             self.redraw_plot()
 
+    def activate_autotrack_mode(self):
+        """Active le mode de suivi automatique."""
+        if self.btn_autotrack.isChecked():
+            # 1. Désactiver les autres boutons
+            self.btn_add_point.setChecked(False)
+            self.btn_add_box.setChecked(False)
+            self.btn_add_layer.setChecked(False)
+            
+            # 2. Reset outils
+            self.rs.set_active(False)
+            self._reset_temp_drawing()
+            
+            # 3. Activer le mode
+            self.drawing_mode = "autotrack"
+            self.autotrack_start_point = None
+            self.lbl_instruction.setText("AUTO-TRACK : Cliquez sur le DÉPART de l'interface.")
+        else:
+            self.drawing_mode = None
+            self.autotrack_start_point = None
+            self.lbl_instruction.setText("Aucun outil sélectionné.")
+
+
     def menu(self):
         # Création de la barre de menu
         menu_bar = self.window.menuBar()
@@ -1154,6 +1299,8 @@ class MainWindow():
         self.control_layout.addWidget(self.listFile_widget)
         self.listFile_widget.itemClicked.connect(self.on_file_clicked)
         #        ---
+
+
 
         ## Ajout des QComboBox de filtre fichier et antenne
 
@@ -1901,57 +2048,87 @@ class MainWindow():
             freq_key=freq_key
         )
 
+   # DANS LA CLASSE MainWindow
+
     def _create_annotation_page(self):
+        """Crée la page de l'interface pour les annotations (Points, Zones, Interfaces)."""
         annotation_widget = QWidget()
         layout = QVBoxLayout(annotation_widget)
         
-        # Outils
-        tools_layout = QHBoxLayout()
+        # --- Outils de dessin ---
+        tools_group = QGroupBox("Outils")
+        tools_layout = QGridLayout() 
         
+        # Bouton Point
         self.btn_add_point = QPushButton("Point")
         self.btn_add_point.setCheckable(True)
         self.btn_add_point.clicked.connect(self.on_tool_point_clicked)
         
+        # Bouton Zone
         self.btn_add_box = QPushButton("Zone")
         self.btn_add_box.setCheckable(True)
         self.btn_add_box.clicked.connect(self.on_tool_box_clicked)
 
-        self.btn_add_layer = QPushButton("Interface") # NOUVEAU
+        # Bouton Interface (Manuel)
+        self.btn_add_layer = QPushButton("Interface")
         self.btn_add_layer.setCheckable(True)
         self.btn_add_layer.clicked.connect(self.on_tool_layer_clicked)
-        
-        tools_layout.addWidget(self.btn_add_point)
-        tools_layout.addWidget(self.btn_add_box)
-        tools_layout.addWidget(self.btn_add_layer)
-        layout.addLayout(tools_layout)
 
-        # Options Snap
+        # --- AJOUT : Bouton Auto-Track ---
+        # On utilise QPushButton au lieu de QAction pour l'afficher dans l'onglet
+        self.btn_autotrack = QPushButton("Auto-Track (Beta)")
+        self.btn_autotrack.setCheckable(True)
+        self.btn_autotrack.clicked.connect(self.activate_autotrack_mode)
+        self.btn_autotrack.setStyleSheet("background-color: #e1f5fe; color: #0277bd;") # Un peu de style pour le distinguer
+        # ---------------------------------
+
+        # Placement dans la grille (Ligne 0)
+        tools_layout.addWidget(self.btn_add_point, 0, 0)
+        tools_layout.addWidget(self.btn_add_box, 0, 1)
+        tools_layout.addWidget(self.btn_add_layer, 0, 2)
+        
+        # Placement de l'Auto-Track (Ligne 1, prend toute la largeur)
+        tools_layout.addWidget(self.btn_autotrack, 1, 0, 1, 3)
+
+        # --- Options d'Assistance (Snap) ---
         snap_layout = QHBoxLayout()
-        self.check_snap = QCheckBox("Assistance (Snap)")
+        self.check_snap = QCheckBox("Snap (Aimant)")
         self.spin_snap_window = QLineEdit("10")
         self.spin_snap_window.setFixedWidth(40)
+        self.spin_snap_window.setValidator(QIntValidator(1, 100))
+        
         snap_layout.addWidget(self.check_snap)
         snap_layout.addWidget(QLabel("Fenêtre (px):"))
         snap_layout.addWidget(self.spin_snap_window)
-        layout.addLayout(snap_layout)
+        
+        # Ajout des options Snap (Ligne 2)
+        tools_layout.addLayout(snap_layout, 2, 0, 1, 3) 
 
+        tools_group.setLayout(tools_layout)
+        layout.addWidget(tools_group)
+        
         # Instructions
-        self.lbl_instruction = QLabel("...")
+        self.lbl_instruction = QLabel("Sélectionnez un outil...")
+        self.lbl_instruction.setStyleSheet("color: gray; font-style: italic; margin-bottom: 10px;")
+        self.lbl_instruction.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_instruction)
-
-        # Liste et Actions (inchangés...)
-        layout.addWidget(QLabel("Annotations :"))
+        
+        # Liste et Actions (Inchangé)
+        layout.addWidget(QLabel("Liste des annotations :"))
         self.picks_list_widget = QListWidget()
         layout.addWidget(self.picks_list_widget)
         
-        actions = QHBoxLayout()
-        self.del_btn = QPushButton("Supprimer"); self.del_btn.clicked.connect(self.on_delete_pick_clicked)
-        self.exp_btn = QPushButton("Export CSV"); self.exp_btn.clicked.connect(self.on_export_picks_clicked)
-        actions.addWidget(self.del_btn); actions.addWidget(self.exp_btn)
-        layout.addLayout(actions)
-
+        actions_layout = QHBoxLayout()
+        self.delete_pick_button = QPushButton("Supprimer")
+        self.delete_pick_button.clicked.connect(self.on_delete_pick_clicked)
+        self.export_picks_button = QPushButton("Exporter CSV...")
+        self.export_picks_button.clicked.connect(self.on_export_picks_clicked)
+        actions_layout.addWidget(self.delete_pick_button)
+        actions_layout.addWidget(self.export_picks_button)
+        layout.addLayout(actions_layout)
+        
         return annotation_widget
-
+    
     def on_autotrim_clicked(self):
         """Lance la détection automatique des bornes et met à jour l'affichage."""
         # 1. Vérification : Est-ce qu'un fichier est chargé ?
