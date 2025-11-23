@@ -7,6 +7,9 @@ import io
 
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from matplotlib.collections import PathCollection
+import matplotlib.patches as patches
+from matplotlib.widgets import RectangleSelector
 
 import json
 from dataclasses import asdict
@@ -21,6 +24,8 @@ from scipy.stats import trim_mean
 from scipy.ndimage import uniform_filter, median_filter, gaussian_filter
 from PIL import Image # Nécessaire pour créer le GIF
 from PyQt6.QtWidgets import QProgressDialog # Pour la barre de chargement
+
+
 
 import sys
 from PyQt6.QtCore import Qt, QSettings
@@ -93,6 +98,24 @@ class TraitementValues:
     decimation_factor: int = 1
  
     trace_spacing: float = 10.0 # Distance estimée entre chaque trace en cm pour le slicing
+
+@dataclass
+class BoxAnnotation:
+    """Représente une zone rectangulaire avec un label."""
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    label: str
+    color: str = 'red' # Couleur par défaut (red, green, orange, etc.)
+
+@dataclass
+class Pick:
+    """Représente un point d'intérêt sur le radargramme."""
+    label: str
+    x: float
+    y: float
+    color: str = 'red'
 
 class Const():
     def __init__(self):
@@ -250,7 +273,7 @@ class CScanWindow(QWidget):
             ref_header = self.main_window.basalt.data.header
             total_time_ns = ref_header.value_time
         else:
-            QMessageBox.warning(self, "Erreur", "Aucune donnée de référence trouvée.")
+            QMessageBox.warning(self, "Erreur", "Aucune donnée de référence trouvée.")  
             return
 
         epsilon = self.basalt.traitementValues.epsilon
@@ -713,10 +736,22 @@ class MainWindow():
         # 5. On assemble la fenêtre principale
         self.main_layout.addWidget(self.control_panel_widget) # Bloc de gauche
         self.main_layout.addWidget(self.splitter)            # Bloc de droite (maintenant le splitter)
+        self.drawing_mode = None
+        self.box_start_pos = None
 
         self.window.closeEvent = self.closeEvent
         self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
-
+        self.canvas.mpl_connect('button_release_event', self.on_mouse_release)
+        self.canvas.mpl_connect('button_press_event', self.on_mouse_click)
+        self.rs = RectangleSelector(self.ax, self.on_select_box_finished,
+                                    useblit=True,
+                                    button=[1], # Clic gauche uniquement
+                                    minspanx=5, minspany=5, # Ignorer les micro-mouvements
+                                    spancoords='pixels',
+                                    interactive=True, # Permet de redimensionner après coup (optionnel)
+                                    props=dict(facecolor='red', edgecolor='black', alpha=0.2, fill=True))
+        
+        self.rs.set_active(False) # Désactivé par défaut
     def closeEvent(self, event):
         """
         Cette méthode est automatiquement appelée par Qt juste avant que la fenêtre ne se ferme.
@@ -740,6 +775,149 @@ class MainWindow():
     def show(self):
         self.window.show()
         sys.exit(self.app.exec())
+
+    def on_tool_point_clicked(self):
+        """Active le mode Point."""
+        is_checked = self.btn_add_point.isChecked()
+        
+        if is_checked:
+            self.btn_add_box.setChecked(False)
+            self.rs.set_active(False) # Désactive le sélecteur de rectangle
+            self.drawing_mode = "point"
+            self.lbl_instruction.setText("Cliquez sur le graphique pour ajouter un POINT.")
+        else:
+            self.drawing_mode = None
+            self.lbl_instruction.setText("Aucun outil sélectionné.")
+
+    def on_tool_box_clicked(self):
+        """Active le mode Zone (RectangleSelector)."""
+        is_checked = self.btn_add_box.isChecked()
+        
+        # Active ou désactive l'outil de Matplotlib
+        self.rs.set_active(is_checked) 
+        
+        if is_checked:
+            self.btn_add_point.setChecked(False)
+            self.drawing_mode = "box"
+            self.lbl_instruction.setText("Cliquez et glissez pour dessiner une ZONE.")
+        else:
+            self.drawing_mode = None
+            self.lbl_instruction.setText("Aucun outil sélectionné.")
+
+    def on_delete_pick_clicked(self):
+        """Supprime l'annotation sélectionnée (Point ou Zone)."""
+        selected_items = self.picks_list_widget.selectedItems()
+        if not selected_items: return
+        
+        row = self.picks_list_widget.row(selected_items[0])
+        
+        # On détermine si c'est un point ou une boîte en fonction de la liste
+        # Astuce : On regarde d'abord les points, puis les boîtes
+        num_points = len(self.basalt.current_picks)
+        
+        if row < num_points:
+            self.basalt.delete_pick(row)
+        else:
+            # C'est une boîte (l'index est décalé)
+            self.basalt.delete_box(row - num_points)
+            
+        self._update_annotation_list()
+        self.redraw_plot()
+
+    def on_export_picks_clicked(self):
+        """Exporte les annotations."""
+        if not self.basalt.current_picks and not self.basalt.current_boxes:
+            QMessageBox.warning(self.window, "Info", "Rien à exporter.")
+            return
+        fileName, _ = QFileDialog.getSaveFileName(self.window, "Exporter", "", "CSV (*.csv)")
+        if fileName:
+            self.basalt.export_picks_to_csv(fileName)
+
+    def _update_annotation_list(self):
+        """Rafraîchit la liste visuelle."""
+        self.picks_list_widget.clear()
+        # 1. Ajouter les points
+        for p in self.basalt.current_picks:
+            self.picks_list_widget.addItem(f"[POINT] {p.label} (X:{p.x:.1f})")
+        # 2. Ajouter les boîtes
+        for b in self.basalt.current_boxes:
+            self.picks_list_widget.addItem(f"[ZONE] {b.label} ({b.color})")
+
+    def on_mouse_click(self, event):
+        """Gère le clic de souris (Uniquement pour les POINTS)."""
+        if event.inaxes is not self.ax: return
+        
+        # Si on est en mode Point et clic gauche
+        if self.drawing_mode == "point" and event.button == 1:
+            # 1. Demander le Label (Optionnel)
+            label, ok = QInputDialog.getText(self.window, "Nouveau Point", "Label (optionnel) :")
+            if not ok: return # Annulation
+            
+            # 2. Demander la Couleur
+            colors = ["red", "orange", "green", "blue", "yellow", "cyan", "magenta", "white", "black"]
+            color, ok = QInputDialog.getItem(self.window, "Couleur du point", "Choisir une couleur :", 
+                                             colors, 0, False)
+            if not ok: return # Annulation
+
+            # 3. Créer le point
+            # On accepte le label même s'il est vide ("")
+            new_pick = Pick(label, event.xdata, event.ydata, color)
+            
+            # Ajout aux données
+            self.basalt.add_pick(new_pick)
+            
+            # Mise à jour de l'affichage
+            self._update_annotation_list()
+            self.redraw_plot()
+
+    def on_mouse_release(self, event):
+            """
+            Obsolète : La gestion du relâchement pour les zones est maintenant
+            gérée par RectangleSelector (self.rs).
+            """
+            pass
+
+
+    def on_select_box_finished(self, eclick, erelease):
+        """
+        Appelé automatiquement par RectangleSelector quand on relâche la souris.
+        eclick : événement au clic (début)
+        erelease : événement au relâchement (fin)
+        """
+        # Récupération des coordonnées triées (min, max)
+        x1, y1 = eclick.xdata, eclick.ydata
+        x2, y2 = erelease.xdata, erelease.ydata
+        
+        x_min, x_max = sorted([x1, x2])
+        y_min, y_max = sorted([y1, y2])
+        
+        # --- AJOUT : Cacher immédiatement la boîte de sélection temporaire ---
+        # Cela efface le rectangle rouge de sélection de l'écran
+        self.rs.set_visible(False) 
+        self.canvas.draw_idle() # Demande un redessin rapide
+        # --------------------------------------------------------------------
+
+
+        # On demande les infos à l'utilisateur
+        label, ok = QInputDialog.getText(self.window, "Nouvelle Zone", "Label de la zone (ex: D1) :")
+        if not ok: 
+            # Si annuler, on redessine pour effacer le rectangle de sélection
+            self.redraw_plot()
+            return
+        
+        color, ok = QInputDialog.getItem(self.window, "Couleur", "Choisir une couleur :", 
+                                         ["orange", "red", "green", "blue", "yellow"], 0, False)
+        if not ok: 
+            self.redraw_plot()
+            return
+
+        # On crée la boîte et on l'ajoute aux données
+        new_box = BoxAnnotation(x_min, x_max, y_min, y_max, label, color)
+        self.basalt.add_box(new_box)
+        
+        # On met à jour l'affichage et la liste
+        self._update_annotation_list()
+        self.redraw_plot()
 
     def menu(self):
         # Création de la barre de menu
@@ -986,6 +1164,9 @@ class MainWindow():
         self.tab_widget.addTab(self.options_page, "Options")
         # -------------------------
 
+        self.annotation_page = self._create_annotation_page()
+        self.tab_widget.addTab(self.annotation_page, "Annotations")
+
         # Création et ajout de la page (Infos)
         self.info_page = self.create_info_page()
         self.tab_widget.addTab(self.info_page, "Infos")
@@ -1048,7 +1229,8 @@ class MainWindow():
 
         #Decimate
         self.decimation_container.setVisible(not is_simplified)
-
+        # Auto-Trim
+        self.autotrim_container.setVisible(not is_simplified)
         # IMPORTANT: On met à jour l'état des gains auto/manuels
         # pour s'assurer que tout est cohérent.
         self._update_gain_controls_state()
@@ -1082,7 +1264,10 @@ class MainWindow():
                             ylabel=ylabel,
                             show_x_ticks=self.basalt.traitementValues.show_x_ticks,
                             show_y_ticks=self.basalt.traitementValues.show_y_ticks,
-                            interpolation_mode=self.basalt.traitementValues.interpolation_mode)
+                            interpolation_mode=self.basalt.traitementValues.interpolation_mode,
+                            show_annotations=self.checkbox_show_annotations.isChecked(), 
+                            picks_to_plot=self.basalt.current_picks,
+                            boxes_to_plot=self.basalt.current_boxes)
                             
         self.canvas.draw()
 
@@ -1449,7 +1634,6 @@ class MainWindow():
 
         options_layout.addStretch() # Pousse tout vers le haut
 
-
         # --- Section pour la Qualité d'Affichage (dans un conteneur) ---
 
         # 1. On crée le widget conteneur
@@ -1504,6 +1688,47 @@ class MainWindow():
         # 3. On ajoute le conteneur entier au layout principal de la page "Options"
         options_layout.addWidget(self.decimation_container)
 
+        # --- Section Auto-Trim (dans un conteneur) ---
+        self.autotrim_container = QWidget()
+        trim_layout = QVBoxLayout(self.autotrim_container)
+        trim_layout.setContentsMargins(0, 0, 0, 0)
+
+        line_trim = QFrame()
+        line_trim.setFrameShape(QFrame.Shape.HLine)
+        line_trim.setFrameShadow(QFrame.Shadow.Sunken)
+        trim_layout.addWidget(line_trim)
+
+        label_trim = QLabel("--- Découpage Auto (Auto-Trim) ---")
+        label_trim.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        trim_layout.addWidget(label_trim)
+
+        trim_controls_layout = QHBoxLayout()
+        trim_controls_layout.addWidget(QLabel("Seuil (0-1):"))
+        
+        self.line_edit_trim_threshold = QLineEdit("0.05")
+        self.line_edit_trim_threshold.setValidator(QDoubleValidator(0.0, 1.0, 3))
+        self.line_edit_trim_threshold.setToolTip("Sensibilité au mouvement. Plus bas = plus sensible.")
+        trim_controls_layout.addWidget(self.line_edit_trim_threshold)
+        
+        self.btn_apply_autotrim = QPushButton("Détecter et Couper")
+        self.btn_apply_autotrim.clicked.connect(self.on_autotrim_clicked)
+        trim_controls_layout.addWidget(self.btn_apply_autotrim)
+        
+        trim_layout.addLayout(trim_controls_layout)
+        
+        # --- AJOUT : Case à cocher pour les annotations ---
+        line_ano = QFrame()
+        line_ano.setFrameShape(QFrame.Shape.HLine)
+        line_ano.setFrameShadow(QFrame.Shadow.Sunken)
+        options_layout.addWidget(line_ano)
+
+        # Création de l'attribut manquant
+        self.checkbox_show_annotations = QCheckBox("Afficher les annotations sur le graphique")
+        self.checkbox_show_annotations.setChecked(True) # Par défaut, on les voit
+        self.checkbox_show_annotations.stateChanged.connect(self.redraw_plot) # Redessine quand on clique
+        options_layout.addWidget(self.checkbox_show_annotations)
+        # --- FIN DE L'AJOUT ---
+        options_layout.addWidget(self.autotrim_container)
         return options_widget
 
     def _get_current_file_list(self) -> list[Path]:
@@ -1527,6 +1752,100 @@ class MainWindow():
             freq_key=freq_key
         )
 
+    def _create_annotation_page(self):
+        """Crée la page de l'interface pour les annotations (Points et Zones)."""
+        annotation_widget = QWidget()
+        layout = QVBoxLayout(annotation_widget)
+        
+        # --- Outils de dessin ---
+        tools_group = QGroupBox("Outils")
+        tools_layout = QHBoxLayout()
+        
+        self.btn_add_point = QPushButton("Mode Point")
+        self.btn_add_point.setCheckable(True)
+        self.btn_add_point.clicked.connect(self.on_tool_point_clicked)
+        
+        self.btn_add_box = QPushButton("Mode Zone")
+        self.btn_add_box.setCheckable(True)
+        self.btn_add_box.clicked.connect(self.on_tool_box_clicked)
+        
+        tools_layout.addWidget(self.btn_add_point)
+        tools_layout.addWidget(self.btn_add_box)
+        tools_group.setLayout(tools_layout)
+        layout.addWidget(tools_group)
+        
+        # Instructions
+        self.lbl_instruction = QLabel("Sélectionnez un outil pour commencer...")
+        self.lbl_instruction.setStyleSheet("color: gray; font-style: italic; margin-bottom: 10px;")
+        self.lbl_instruction.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.lbl_instruction)
+        
+        # --- Liste des annotations ---
+        layout.addWidget(QLabel("Liste des annotations :"))
+        self.picks_list_widget = QListWidget()
+        layout.addWidget(self.picks_list_widget)
+        
+        # --- Actions ---
+        actions_layout = QHBoxLayout()
+        self.delete_pick_button = QPushButton("Supprimer")
+        self.delete_pick_button.clicked.connect(self.on_delete_pick_clicked)
+        
+        self.export_picks_button = QPushButton("Exporter CSV...")
+        self.export_picks_button.clicked.connect(self.on_export_picks_clicked)
+        
+        actions_layout.addWidget(self.delete_pick_button)
+        actions_layout.addWidget(self.export_picks_button)
+        layout.addLayout(actions_layout)
+        
+        return annotation_widget
+    
+# DANS LA CLASSE MainWindow
+
+    def on_autotrim_clicked(self):
+        """Lance la détection automatique des bornes et met à jour l'affichage."""
+        # 1. Vérification : Est-ce qu'un fichier est chargé ?
+        if self.basalt.data is None:
+            QMessageBox.warning(self.window, "Attention", "Aucun fichier n'est chargé. Veuillez ouvrir un fichier d'abord.")
+            return
+
+        # 2. Récupérer le seuil
+        threshold = self._parse_input_to_float(self.line_edit_trim_threshold.text(), default_on_error=0.05)
+        print(f"Lancement Auto-Trim avec un seuil de {threshold}...")
+
+        # 3. Lancer la détection
+        # On ajoute un curseur d'attente car le calcul peut prendre une fraction de seconde
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            # On passe explicitement debug=True pour être sûr
+            start_trace, end_trace = self.basalt.detect_static_bounds(threshold, debug=True) 
+        finally:
+            QApplication.restoreOverrideCursor()
+        
+        # 4. Vérifier si le résultat a changé quelque chose
+        # On récupère la taille totale pour comparer
+        total_traces = self.basalt.data.header.value_trace
+        
+        if start_trace == 0 and (end_trace == total_traces or end_trace == 0):
+            QMessageBox.information(self.window, "Résultat Auto-Trim", 
+                                    "Aucun mouvement significatif n'a été détecté avec ce seuil.\n"
+                                    "Essayez de baisser la valeur du seuil (ex: 0.02).")
+            return
+
+        # 5. Mettre à jour les valeurs dans la dataclass
+        self.basalt.traitementValues.X0 = start_trace
+        self.basalt.traitementValues.X_lim = end_trace
+        
+        # 6. Mettre à jour les champs de l'interface (X0 et X_lim)
+        self.line_edit_x0.setText(str(start_trace))
+        self.line_edit_xlim.setText(str(end_trace))
+        
+        # 7. Appliquer et rafraîchir
+        print(f"Application du découpage : X0={start_trace}, X_lim={end_trace}")
+        self.update_display()
+        
+        # Message de succès (optionnel, peut être retiré si trop intrusif)
+        # QMessageBox.information(self.window, "Succès", f"Scan découpé : traces {start_trace} à {end_trace}.")
+   
     def populate_listFile_widget(self):
         """Remplit le QListWidget avec les noms de fichiers, triés numériquement."""
         self.listFile_widget.clear()
@@ -2416,7 +2735,32 @@ class Basalt():
 
         self.epsilon :float = 8 
 
+        self.current_picks: list = []
+        self.all_boxes: dict[str, list] = {}
+        self.current_boxes: list = []
+
         self.current_file_index: int = 0
+
+    def add_box(self, box: BoxAnnotation):
+        if self.selectedFile:
+            self.current_boxes.append(box)
+            self.all_boxes[self.selectedFile.stem] = self.current_boxes
+
+    def delete_box(self, index: int):
+        if 0 <= index < len(self.current_boxes):
+            del self.current_boxes[index]
+            if self.selectedFile:
+                self.all_boxes[self.selectedFile.stem] = self.current_boxes
+                
+    def load_annotations_for_current_file(self):
+        """Charge picks ET boxes."""
+        if self.selectedFile:
+            filename = self.selectedFile.stem
+            self.current_picks = self.all_picks.get(filename, [])
+            self.current_boxes = self.all_boxes.get(filename, [])
+        else:
+            self.current_picks = []
+            self.current_boxes = []
 
     def setFolder(self,folder:str):
         if os.path.isdir(folder):
@@ -2657,50 +3001,199 @@ class Basalt():
         print(f"T0 automatiquement détecté à l'échantillon RELATIF : {t0_sample}")
         return t0_sample
 
+
+
+    def add_pick(self, pick: Pick):
+        """Ajoute un point à la liste du fichier courant."""
+        if self.selectedFile:
+            self.current_picks.append(pick)
+            # On utilise le nom du fichier comme clé pour stocker les annotations
+            # (Vous pouvez aussi utiliser self.all_picks si vous l'avez défini)
+
+    def delete_pick(self, index: int):
+        """Supprime un point par son index."""
+        if 0 <= index < len(self.current_picks):
+            del self.current_picks[index]
+
+    def export_picks_to_csv(self, filepath: str):
+        """Exporte les points et les zones dans un CSV."""
+        import csv
+        try:
+            with open(filepath, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Type', 'Label', 'X_Min/X', 'Y_Min/Y', 'X_Max', 'Y_Max', 'Color'])
+                
+                # Export des points
+                for p in self.current_picks:
+                    writer.writerow(['Point', p.label, p.x, p.y, '', '', p.color])
+                
+                # Export des zones
+                for b in self.current_boxes:
+                    writer.writerow(['Zone', b.label, b.x_min, b.y_min, b.x_max, b.y_max, b.color])
+                    
+            print(f"Annotations exportées : {filepath}")
+        except Exception as e:
+            print(f"Erreur export CSV : {e}")
+
+
+    def detect_static_bounds(self, threshold: float = 0.05, debug: bool = True): # <--- Ajout de debug=True
+        """
+        Analyse le fichier complet pour détecter le début et la fin du mouvement.
+        Retourne les indices (start, end) recommandés.
+        """
+        if self.data is None:
+            return 0, 0
+
+        # 1. On récupère les données brutes complètes du canal actif
+        raw_data = self._getDataTraité(self.data.dataFile)
+        
+        if raw_data.size == 0:
+            return 0, 0
+
+        # 2. Calcul de la différence entre traces consécutives (le "mouvement")
+        # On travaille en float32 pour la précision
+        # axis=1 signifie qu'on fait la diff entre les colonnes (traces)
+        diffs = np.sum(np.abs(np.diff(raw_data.astype(np.float32), axis=1)), axis=0)
+        
+        # --- LISSAGE (Indispensable pour éviter les faux positifs) ---
+        smooth_window = 20
+        if len(diffs) > smooth_window:
+            diffs_smooth = uniform_filter1d(diffs, size=smooth_window)
+        else:
+            diffs_smooth = diffs
+        
+        # 3. Normalisation entre 0 et 1
+        max_diff = np.max(diffs_smooth)
+        if max_diff == 0:
+            return 0, raw_data.shape[1] # Aucun mouvement détecté
+            
+        movement_curve = diffs_smooth / max_diff
+        
+        # 4. Recherche des indices où le mouvement dépasse le seuil
+        active_indices = np.where(movement_curve > threshold)[0]
+        
+        total_traces = raw_data.shape[1]
+        
+        if len(active_indices) > 0:
+            # On prend le premier index détecté
+            start_idx = int(active_indices[0])
+            
+            # On prend le dernier index détecté (+2 pour la marge)
+            end_idx = int(active_indices[-1]) + 2
+            
+            # Sécurité pour ne pas dépasser la taille réelle
+            end_idx = min(end_idx, total_traces)
+        else:
+            start_idx = 0
+            end_idx = total_traces
+
+        # --- AFFICHAGE DU GRAPHIQUE DE DEBUG ---
+        if debug:
+            try:
+                plt.figure(figsize=(10, 4))
+                plt.plot(movement_curve, label="Mouvement détecté (Lissé)", color='blue')
+                plt.axhline(threshold, color='red', linestyle='--', label=f"Seuil actuel ({threshold})")
+                
+                if len(active_indices) > 0:
+                    plt.axvline(start_idx, color='green', linestyle='-', label='Début Cut')
+                    plt.axvline(end_idx, color='green', linestyle='-', label='Fin Cut')
+                    plt.title(f"Analyse Auto-Trim : Mouvement détecté entre {start_idx} et {end_idx}")
+                else:
+                    plt.title("Analyse Auto-Trim : AUCUN mouvement détecté au-dessus du seuil")
+                
+                plt.xlabel("Numéro de Trace")
+                plt.ylabel("Intensité du Mouvement (0-1)")
+                plt.legend()
+                plt.grid(True, linestyle=':', alpha=0.6)
+                plt.tight_layout()
+                plt.show() # Bloque l'exécution jusqu'à fermeture de la fenêtre
+            except Exception as e:
+                print(f"Impossible d'afficher le graphique de debug : {e}")
+
+        return start_idx, end_idx
+
     def get_plot_axes_parameters(self):
         """
-        Calcule l'extent et les labels pour le graphique en fonction des unités choisies.
+        Calcule l'extent et les labels pour le graphique.
+        Adapte le calcul de l'échelle si une distance est forcée sur une sélection.
         """
         if self.data is None:
             return None, "", ""
 
         header = self.data.header
+        
+        # 1. Récupération des bornes de zoom (en indices/traces/samples)
         y_start_sample = int(self.traitementValues.T0)
         y_end_sample = int(self.traitementValues.T_lim if self.traitementValues.T_lim is not None else header.value_sample)
+        
         x_start_trace = int(self.traitementValues.X0)
         x_end_trace = int(self.traitementValues.X_lim if self.traitementValues.X_lim is not None else header.value_trace)
-
-        # Logique pour la distance par trace (m_par_trace)
-        distance_totale = header.value_dist_total
         
-        # On vérifie si une distance a été forcée par l'utilisateur
+        # Sécurité pour éviter les inversions ou égalités
+        if x_end_trace <= x_start_trace:
+             x_end_trace = x_start_trace + 1
+
+        # 2. CALCUL DU RATIO (Mètres par Trace)
+        # C'est ici que la logique change
+        
+        # Cas A : L'utilisateur a forcé une distance manuelle
         if self.traitementValues.X_dist is not None and self.traitementValues.X_dist > 0:
-            distance_totale = self.traitementValues.X_dist
-            print(f"Utilisation de la distance forcée : {distance_totale} m")
-        
-        m_par_trace = distance_totale / header.value_trace if header.value_trace else 0
+            user_distance = self.traitementValues.X_dist
+            
+            # Le nombre de traces concernées par cette distance est celui de la SÉLECTION
+            nb_traces_selection = x_end_trace - x_start_trace
+            
+            if nb_traces_selection > 0:
+                m_par_trace = user_distance / nb_traces_selection
+            else:
+                m_par_trace = 1.0
+                
+            # Si on force une distance sur une découpe, on veut généralement que 
+            # l'axe commence à 0 et finisse à la distance demandée.
+            # On force donc x_start à 0 pour l'affichage relatif de cette coupe.
+            x_start_phys = 0.0
+            x_end_phys = user_distance
 
-        # Le reste des calculs de conversion est maintenant correct
+        # Cas B : On utilise la distance du fichier (automatique)
+        else:
+            # Ici, la distance totale du header correspond à TOUTES les traces du fichier
+            total_traces_file = header.value_trace
+            total_dist_file = header.value_dist_total
+            
+            if total_traces_file > 0:
+                if total_dist_file <= 0: # Sécurité si pas de roue codeuse
+                    m_par_trace = 1.0 
+                else:
+                    m_par_trace = total_dist_file / total_traces_file
+            else:
+                m_par_trace = 1.0
+
+            # On applique le ratio aux bornes de découpe pour garder la position absolue
+            x_start_phys = x_start_trace * m_par_trace
+            x_end_phys = x_end_trace * m_par_trace
+            
+        # 3. CALCUL DES BORNES VERTICALES (Y)
         ns_par_sample = header.value_time / header.value_sample if header.value_sample else 0
-        s_par_trace = header.value_step_time_acq if header.value_step_time_acq is not None else 0
         vitesse = cste_global["c_lum"] / sqrt(self.traitementValues.epsilon)
+        plage_samples = y_end_sample - y_start_sample
 
-        # --- Calcul pour l'axe X ---
+        # Axe X Label
         unit_x = self.traitementValues.unit_x
         if unit_x == "Distance (m)":
-            x_start, x_end = x_start_trace * m_par_trace, x_end_trace * m_par_trace
+            # Les valeurs calculées ci-dessus sont utilisées
+            x_start, x_end = x_start_phys, x_end_phys
             xlabel = "Distance (m)"
         elif unit_x == "Temps (s)":
-            x_start, x_end = x_start_trace * s_par_trace, x_end_trace * s_par_trace
+            s_par_trace = header.value_step_time_acq if header.value_step_time_acq is not None else 0
+            x_start = x_start_trace * s_par_trace
+            x_end = x_end_trace * s_par_trace
             xlabel = "Temps d'acquisition (s)"
-        else: # Pour "Traces"
+        else: # "Traces"
             x_start, x_end = x_start_trace, x_end_trace
             xlabel = "N° de Trace"
 
-        # --- Calcul pour l'axe Y ---
+        # Axe Y Label & Values
         unit_y = self.traitementValues.unit_y
-        plage_samples = y_end_sample - y_start_sample
-        
         if unit_y == "Profondeur (m)":
             y_start = 0
             plage_de_temps_ns = plage_samples * ns_par_sample
@@ -2710,15 +3203,14 @@ class Basalt():
             y_start = 0
             y_end = plage_samples * ns_par_sample
             ylabel = "Temps relatif (ns)"
-        else: # Pour "Samples"
+        else: # "Samples"
             y_start = 0
             y_end = plage_samples
             ylabel = "N° d'Échantillon relatif"
 
         plot_extent = [x_start, x_end, y_end, y_start]
-        
         return plot_extent, xlabel, ylabel
-
+    
     def run_deconvolution(self, wavelet_start: int, wavelet_end: int, noise_percent: float):
         """Lance la déconvolution sur les données actuellement traitées."""
         if self.traitement is None: return
@@ -3298,6 +3790,7 @@ class Traitement():
         except Exception as e:
             print(f"Erreur lors de l'application du filtre passe-bande: {e}")
 
+
     def apply_spiking_deconvolution(self, start: int, end: int, noise_percent: float):
         """
         Applique une déconvolution de Wiener pour compresser l'ondelette.
@@ -3347,22 +3840,31 @@ class Traitement():
         # ce qui inverse leur ordre.
         self.data = self.data[:, ::-1]
 
+# Assurez-vous d'avoir les imports en haut du fichier :
+# import matplotlib.patches as patches
+# from matplotlib.collections import PathCollection
+
 class Graphique():
     def __init__(self, ax : plt.Axes, fig : Figure):
-        self.vmin = -5e9
-        self.vmax = 5e9
+        self.vmin = -1000
+        self.vmax = 1000
         self.contraste = 0.5
         self.fig : Figure = fig
         self.ax : plt.Axes = ax
         self.im = None
 
-    def setVerticalgrid(self,flag : bool):
+    def setVerticalgrid(self, flag : bool):
         self.ax.grid(visible=flag, axis='x',linewidth = 0.5, color = "black", linestyle ='-.')
 
-    def setHorizontalgrid(self,flag : bool):
+    def setHorizontalgrid(self, flag : bool):
         self.ax.grid(visible=flag, axis='y',linewidth = 0.5, color = "black", linestyle ='-.')
 
-    def plot(self, data, title:str, x_ticks: int, y_ticks: int, extent: list, xlabel: str, ylabel: str, show_x_ticks: bool, show_y_ticks: bool, interpolation_mode: str):
+    def plot(self, data, title:str, x_ticks: int, y_ticks: int, extent: list, xlabel: str, ylabel: str, 
+             show_x_ticks: bool, show_y_ticks: bool, interpolation_mode: str, 
+             show_annotations: bool = False, 
+             picks_to_plot: list = None,
+             boxes_to_plot: list = None):
+        
         titre_complet = "Scan : " + title
         
         if self.im is None:
@@ -3379,99 +3881,115 @@ class Graphique():
         self.ax.set_xlim(extent[0], extent[1])
         self.ax.set_ylim(extent[2], extent[3])
         
-        # On met à jour les labels à chaque fois
         self.ax.set_xlabel(xlabel)
         self.ax.set_ylabel(ylabel)
 
-        # Le reste est inchangé
+        # --- ADAPTATION DYNAMIQUE DE L'ÉCHELLE ---
+        max_amp = np.max(np.abs(data))
+        if max_amp == 0: max_amp = 1.0
+        
+        self.vmax = max_amp * 1.5
+        self.vmin = -max_amp * 1.5
+        # -----------------------------------------
+
         vmin, vmax = self.getRangePlot()
         self.im.set_clim(vmin=vmin, vmax=vmax)
 
         self.ax.locator_params(axis='x', nbins=x_ticks)
         self.ax.locator_params(axis='y', nbins=y_ticks)
 
-        # --- GESTION DE LA GRILLE (Version Définitive) ---
-
-        # 1. On efface TOUTES les grilles précédentes pour repartir de zéro.
+        # --- GESTION DE LA GRILLE ---
         self.ax.grid(False)
-
-        # 2. On redessine la grille X (verticale) UNIQUEMENT si la checkbox est cochée.
         if show_x_ticks:
             self.ax.grid(True, axis='x', color='black', linestyle='-.', linewidth=0.5)
-
-        # 3. On redessine la grille Y (horizontale) UNIQUEMENT si la checkbox est cochée.
         if show_y_ticks:
             self.ax.grid(True, axis='y', color='black', linestyle='-.', linewidth=0.5)
 
-        # --- FIN DE LA CORRECTION ---
+        # --- GESTION DES ANNOTATIONS (CORRECTION ICI) ---
+        # 1. Nettoyage sécurisé : On vide les conteneurs spécifiques
+        
+        # Supprime tous les textes ajoutés manuellement (annotations)
+        # On utilise list() pour créer une copie et éviter les erreurs d'itération
+        for txt in list(self.ax.texts):
+            txt.remove()
+            
+        # Supprime toutes les collections (les points du scatter plot)
+        for coll in list(self.ax.collections):
+            coll.remove()
+            
+        # Supprime les rectangles (Patches)
+        for patch in list(self.ax.patches):
+            patch.remove()
 
-        try: #Optimisation de l'espace
+        # 2. Dessin des nouvelles annotations
+        if show_annotations:
+            # a) Points
+            if picks_to_plot:
+                # On prépare les listes pour le scatter plot
+                x_coords = [p.x for p in picks_to_plot]
+                y_coords = [p.y for p in picks_to_plot]
+                colors = [p.color for p in picks_to_plot] # Liste des couleurs
+                
+                # On dessine tous les points d'un coup avec leurs couleurs respectives
+                # c=colors applique la couleur correspondante à chaque point
+                self.ax.scatter(x_coords, y_coords, c=colors, marker='+', s=100)
+                
+                # On ajoute le label SEULEMENT s'il n'est pas vide
+                for pick in picks_to_plot:
+                    if pick.label and pick.label.strip(): # Vérifie que le texte n'est pas vide
+                        self.ax.text(pick.x, pick.y, f" {pick.label}", 
+                                     color=pick.color, fontsize=9, va='center', fontweight='bold')
+            
+            # b) Boîtes
+            if boxes_to_plot:
+                for box in boxes_to_plot:
+                    width = box.x_max - box.x_min
+                    height = box.y_max - box.y_min
+                    
+                    rect = patches.Rectangle((box.x_min, box.y_min), width, height, 
+                                             linewidth=1, edgecolor=box.color, facecolor=box.color, alpha=0.3)
+                    self.ax.add_patch(rect)
+                    
+                    center_x = box.x_min + width / 2
+                    center_y = box.y_min + height / 2
+                    self.ax.text(center_x, center_y, box.label, 
+                                 color='white', fontsize=10, fontweight='bold', 
+                                 ha='center', va='center',
+                                 bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
+
+        try:
             self.fig.tight_layout(rect=[0, 0.05, 1, 1])
-        except Exception as e:
-            print(f"Avertissement : tight_layout a échoué. {e}")
+        except Exception:
+            pass
 
-        self.ax.figure.canvas.draw()
-
-    def plot_trace(self, trace_data, y_values, xlabel: str, ylabel: str,y_cursor_pos: float = None, x_cursor_pos: float = None):
-        """
-        Efface et redessine le graphique pour afficher une seule trace (courbe 1D).
-        """
-        # 1. On efface complètement les anciens tracés pour éviter les superpositions
+    def plot_trace(self, trace_data, y_values, xlabel: str, ylabel: str, y_cursor_pos: float = None, x_cursor_pos: float = None):
         self.ax.cla()
-
-        # 2. On trace les données : amplitude en X, profondeur/temps/sample en Y
         self.ax.plot(trace_data, y_values, color='blue', linewidth=0.8)
         
-          # Dessine la ligne horizontale du curseur Y si une position est fournie
         if y_cursor_pos is not None:
             self.ax.axhline(y=y_cursor_pos, color='limegreen', linestyle=':', linewidth=1.5)
-            
-        # Dessine la ligne verticale du curseur X (amplitude) si une position est fournie
         if x_cursor_pos is not None:
             self.ax.axvline(x=x_cursor_pos, color='limegreen', linestyle=':', linewidth=1.5)
 
-
-        # 3. On configure les axes
         self.ax.set_xlabel(xlabel)
         self.ax.xaxis.set_label_position('top')
         self.ax.xaxis.set_ticks_position('top')
-        
-        # 4. On inverse l'axe Y pour qu'il corresponde au radargramme (0 en haut)
         self.ax.invert_yaxis()
-        
-        vmin, vmax = self.getRangePlot()
-        #self.ax.set_xlim(vmin, vmax)
-
-        # On active une grille pour mieux lire les valeurs
         self.ax.grid(True, linestyle='--', linewidth=0.5)
         
-        try: #Optimisation de l'espace
+        try:
             self.fig.tight_layout(rect=[0, 0.05, 1, 1])
-        except Exception as e:
-            print(f"Avertissement : tight_layout a échoué. {e}")
-            
+        except Exception:
+            pass
+        
         self.fig.canvas.draw()
 
-
     def getRangePlot(self):
-        """
-        Calcule vmin et vmax en appliquant le contraste (multiplicateur)
-        à une plage de valeurs de base fixes.
-        """
-        # self.contraste est la valeur du slider (ex: de 0.01 à 1.00)
-        # self.vmin et self.vmax sont vos valeurs de base fixes.
-        
-        # On applique le contraste sur la plage de base.
-        # Note : Si vous voulez que le slider ait plus ou moins d'effet,
-        # vous pouvez changer la formule (ex: q = self.contraste / 10)
-        # mais q = self.contraste est un bon point de départ.
         q = self.contraste 
-
         min_val = self.vmin * q
         max_val = self.vmax * q
-
         return min_val, max_val
-
+    
 if __name__ == '__main__':
     software_name = "Basalt - Le radar en profondeur"
     main_window = MainWindow(software_name)
