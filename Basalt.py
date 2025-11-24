@@ -28,8 +28,6 @@ from scipy.ndimage import uniform_filter, median_filter, gaussian_filter
 from PIL import Image # Nécessaire pour créer le GIF
 from PyQt6.QtWidgets import QProgressDialog # Pour la barre de chargement
 
-
-
 import sys
 from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox, QInputDialog, QGridLayout, QMainWindow, QFileDialog, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QFrame, QListWidget, QRadioButton, QComboBox, QLineEdit, QTabWidget, QCheckBox, QSlider, QListWidgetItem, QGroupBox, QSplitter, QPushButton,QDialog, QFormLayout, QDialogButtonBox
@@ -868,13 +866,12 @@ class MainWindow():
         self.canvas.draw_idle()
 
     def on_tool_point_clicked(self):
-        """Active le mode Point."""
+        """Active Point."""
         if self.btn_add_point.isChecked():
-            # On désactive les DEUX autres
             self.btn_add_box.setChecked(False)
-            self.btn_add_layer.setChecked(False) 
+            self.btn_add_layer.setChecked(False)
+            self.btn_autotrack.setChecked(False) # <--- Important
             
-            # Reset des outils
             self.rs.set_active(False)
             self._reset_temp_drawing()
             
@@ -885,14 +882,14 @@ class MainWindow():
             self.lbl_instruction.setText("Aucun outil sélectionné.")
 
     def on_tool_box_clicked(self):
-        """Active le mode Zone."""
+        """Active Zone."""
         if self.btn_add_box.isChecked():
-            # On désactive les DEUX autres
             self.btn_add_point.setChecked(False)
             self.btn_add_layer.setChecked(False)
+            self.btn_autotrack.setChecked(False) # <--- Important
             
             self._reset_temp_drawing()
-            self.rs.set_active(True) # Active le RectangleSelector
+            self.rs.set_active(True)
             
             self.drawing_mode = "box"
             self.lbl_instruction.setText("Glissez pour créer une ZONE.")
@@ -902,17 +899,17 @@ class MainWindow():
             self.lbl_instruction.setText("Aucun outil sélectionné.")
 
     def on_tool_layer_clicked(self):
-        """Active le mode Interface (Couche)."""
+        """Active Interface (Manuel)."""
         if self.btn_add_layer.isChecked():
-            # On désactive les DEUX autres
             self.btn_add_point.setChecked(False)
             self.btn_add_box.setChecked(False)
+            self.btn_autotrack.setChecked(False) # <--- Important
             
             self.rs.set_active(False)
             self._reset_temp_drawing()
             
             self.drawing_mode = "layer"
-            self.lbl_instruction.setText("Clic G: Point | Clic Droit/Entrée: Finir")
+            self.lbl_instruction.setText("Clic G: Point | Clic Droit: Finir")
         else:
             self._reset_temp_drawing()
             self.drawing_mode = None
@@ -1223,27 +1220,23 @@ class MainWindow():
             self.redraw_plot()
 
     def activate_autotrack_mode(self):
-        """Active le mode de suivi automatique."""
+        """Active Auto-Track."""
         if self.btn_autotrack.isChecked():
-            # 1. Désactiver les autres boutons
             self.btn_add_point.setChecked(False)
             self.btn_add_box.setChecked(False)
-            self.btn_add_layer.setChecked(False)
+            self.btn_add_layer.setChecked(False) # <--- Important
             
-            # 2. Reset outils
             self.rs.set_active(False)
             self._reset_temp_drawing()
             
-            # 3. Activer le mode
             self.drawing_mode = "autotrack"
             self.autotrack_start_point = None
-            self.lbl_instruction.setText("AUTO-TRACK : Cliquez sur le DÉPART de l'interface.")
+            self.lbl_instruction.setText("AUTO-TRACK : Cliquez sur le point de DÉPART.")
         else:
             self.drawing_mode = None
             self.autotrack_start_point = None
             self.lbl_instruction.setText("Aucun outil sélectionné.")
-
-
+   
     def menu(self):
         # Création de la barre de menu
         menu_bar = self.window.menuBar()
@@ -1294,227 +1287,192 @@ class MainWindow():
         mode_menu.addAction(self.simplified_mode_action)
 
     def init_ui(self):
-        #---Liste des fichier
+        """Initialisation de l'interface avec une mise en page compacte et optimisée."""
+        self.float_validator = AcceptEmptyDoubleValidator(0, 100000.0, 2)
+        self.float_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        # 1. Liste des fichiers (On lui donne une taille fixe raisonnable)
         self.listFile_widget = QListWidget()
+        self.listFile_widget.setMaximumHeight(120) # Limite la hauteur pour laisser de la place au reste
         self.control_layout.addWidget(self.listFile_widget)
         self.listFile_widget.itemClicked.connect(self.on_file_clicked)
-        #        ---
 
+        # --- BLOC 1 : PARAMÈTRES DE FICHIER & AFFICHAGE (GRILLE) ---
+        # On regroupe tout ça dans un GroupBox invisible ou discret
+        params_widget = QWidget()
+        grid = QGridLayout(params_widget)
+        grid.setContentsMargins(0, 5, 0, 5) # Marges réduites
+        grid.setVerticalSpacing(5)
 
-
-        ## Ajout des QComboBox de filtre fichier et antenne
-
-# Crée un layout horizontal pour la première paire (Extension)
-        extension_layout = QHBoxLayout()
-        label_extension = QLabel("Extension de fichier:")
+        # Ligne 0 : Extension et Filtre Fréquence
+        label_ext = QLabel("Ext:")
         self.combo_box_extension = QComboBox()
         self.combo_box_extension.addItems(self.constante.ext_list)
-        # Ajoute le label et la combobox à LEUR propre layout horizontal
-        extension_layout.addWidget(label_extension)
-        extension_layout.addWidget(self.combo_box_extension)
-        # Ajoute ce premier layout de paire au panneau de contrôle vertical
-        self.control_layout.addLayout(extension_layout)
-
-        # Crée un layout horizontal pour la deuxième paire (Fréquence)
-        frequence_layout = QHBoxLayout()
-        self.label_frequence = QLabel("Filtre fréquence :") 
         
+        self.label_frequence = QLabel("Filtre:")
         self.combo_box_frequence = QComboBox()
         self.combo_box_frequence.addItems(self.constante.freq_state)
-        
-        # On utilise la nouvelle variable
-        frequence_layout.addWidget(self.label_frequence)
-        frequence_layout.addWidget(self.combo_box_frequence)
-        self.control_layout.addLayout(frequence_layout)
 
+        grid.addWidget(label_ext, 0, 0)
+        grid.addWidget(self.combo_box_extension, 0, 1)
+        grid.addWidget(self.label_frequence, 0, 2)
+        grid.addWidget(self.combo_box_frequence, 0, 3)
 
-        # On connecte les signaux après avoir créé les objets
-        self.combo_box_extension.currentTextChanged.connect(self.on_extension_changed)
-        self.combo_box_frequence.currentTextChanged.connect(self.on_secondary_filter_changed)
-        # ----- 
-
-        ## Réglage du Contraste
-
-        # Layout horizontal pour le slider de contraste
-        self.contrast_layout = QHBoxLayout()
-        self.control_layout.addLayout(self.contrast_layout)
-
-        # Label pour le contraste
-        self.label_contrast = QLabel("Contraste:")
-        self.contrast_layout.addWidget(self.label_contrast)
-
-        # QSlider pour le contraste
-        self.slider_contrast = QSlider(Qt.Orientation.Horizontal)
-        self.slider_contrast.setMinimum(1)    # Correspond à 0.01 (0.01 * 100)
-        self.slider_contrast.setMaximum(100)  # Correspond à 1.00 (1.00 * 100)
-        self.slider_contrast.setValue(50)     # Valeur initiale, correspond à 0.50
-        self.slider_contrast.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.slider_contrast.setTickInterval(10) # Affiche des marques tous les 0.1 (10 unités)
-        self.contrast_layout.addWidget(self.slider_contrast)
-
-        # Label pour afficher la valeur actuelle du contraste
-        self.current_contrast_label = QLabel("1.0") # Texte initial basé sur slider.setValue(50)
-        self.contrast_layout.addWidget(self.current_contrast_label)
-
-        # Connecter le signal valueChanged du slider
-        self.slider_contrast.valueChanged.connect(self.on_contrast_slider_changed)
-
-        # ---
-        
-        ## Saisie des Paramètres 
-
-        # Layout horizontal pour les champs de texte
-        self.params_layout = QHBoxLayout()
-        self.control_layout.addLayout(self.params_layout)
-
-        # Création du validateur pour les nombres flottants (double)
-        # Il accepte des nombres entre -1000 et 1000 (ajuste les limites si besoin)
-        # et avec 2 chiffres après la virgule.
-        self.float_validator = QDoubleValidator(0, 100000.0, 2)
-        self.float_validator = AcceptEmptyDoubleValidator(0, 100000.0, 2)
-        # Permet la notation standard (ex: 12.34), pas la notation scientifique
-        self.float_validator.setNotation(QDoubleValidator.Notation.StandardNotation) 
-
-        # Champ de texte pour la Distance
-        self.label_distance = QLabel("Distance (m):")
-        self.params_layout.addWidget(self.label_distance)
+        # Ligne 1 : Distance forcée et Epsilon
+        self.label_distance = QLabel("Dist (m):")
         self.line_edit_distance = QLineEdit()
-        self.line_edit_distance.setPlaceholderText("Forcer la distance (optionnel)")
-        self.line_edit_distance.setValidator(self.float_validator) # Applique le validateur
-        self.params_layout.addWidget(self.line_edit_distance)
-        self.line_edit_distance.editingFinished.connect(self.on_distance_edited)
-
-        # Champ de texte pour Epsilon
+        self.line_edit_distance.setPlaceholderText("Auto")
+        self.line_edit_distance.setValidator(self.float_validator)
+        
         self.label_epsilon = QLabel("Epsilon:")
-        self.params_layout.addWidget(self.label_epsilon)
-        self.line_edit_epsilon = QLineEdit()
-        self.line_edit_epsilon.setPlaceholderText("Entrez epsilon")
-        self.line_edit_epsilon.setText("8.0") # Valeur par défaut
-        self.line_edit_epsilon.setValidator(self.float_validator) # Applique le validateur
-        self.params_layout.addWidget(self.line_edit_epsilon)
-        # Connecter le signal editingFinished pour Epsilon
-        self.line_edit_epsilon.editingFinished.connect(self.on_epsilon_edited)
+        self.line_edit_epsilon = QLineEdit("8.0")
+        self.line_edit_epsilon.setValidator(self.float_validator)
+        self.line_edit_epsilon.setFixedWidth(50) # Petit champ pour epsilon
 
-    # ---- 
-         ## Unités des Axes ----- Aucune fonction d'évènement
-        # Layout horizontal pour les ComboBox des unités
-        self.units_layout = QHBoxLayout()
-        self.control_layout.addLayout(self.units_layout)
+        grid.addWidget(self.label_distance, 1, 0)
+        grid.addWidget(self.line_edit_distance, 1, 1)
+        grid.addWidget(self.label_epsilon, 1, 2)
+        grid.addWidget(self.line_edit_epsilon, 1, 3)
 
-        # ComboBox pour l'unité de l'abscisse (X)
-        self.label_unit_x = QLabel("Unité X:")
-        self.units_layout.addWidget(self.label_unit_x)
+        # Ligne 2 : Contraste (Prend toute la largeur)
+        contrast_layout = QHBoxLayout()
+        self.label_contrast = QLabel("Contraste:")
+        self.slider_contrast = QSlider(Qt.Orientation.Horizontal)
+        self.slider_contrast.setMinimum(1)
+        self.slider_contrast.setMaximum(100)
+        self.slider_contrast.setValue(50)
+        self.current_contrast_label = QLabel("0.5")
+        self.current_contrast_label.setFixedWidth(30)
+
+        contrast_layout.addWidget(self.label_contrast)
+        contrast_layout.addWidget(self.slider_contrast)
+        contrast_layout.addWidget(self.current_contrast_label)
+        
+        # On ajoute ce layout horizontal dans la grille (sur 4 colonnes)
+        grid.addLayout(contrast_layout, 2, 0, 1, 4)
+
+        # Ligne 3 : Unités X et Y
+        self.label_unit_x = QLabel("Unit X:")
         self.combo_box_unit_x = QComboBox()
         self.combo_box_unit_x.addItems(self.constante.Xlabel)
-        self.units_layout.addWidget(self.combo_box_unit_x)
-        self.combo_box_unit_x.currentTextChanged.connect(self.on_unit_x_changed)
-
-        # ComboBox pour l'unité de l'ordonnée (Y)
-        self.label_unit_y = QLabel("Unité Y:")
-        self.units_layout.addWidget(self.label_unit_y)
+        
+        self.label_unit_y = QLabel("Unit Y:")
         self.combo_box_unit_y = QComboBox()
         self.combo_box_unit_y.addItems(self.constante.Ylabel)
-        self.units_layout.addWidget(self.combo_box_unit_y)
-        self.combo_box_unit_y.currentTextChanged.connect(self.on_unit_y_changed)
 
-        # --- 
+        grid.addWidget(self.label_unit_x, 3, 0)
+        grid.addWidget(self.combo_box_unit_x, 3, 1)
+        grid.addWidget(self.label_unit_y, 3, 2)
+        grid.addWidget(self.combo_box_unit_y, 3, 3)
 
-        ## Limites des Axes (X0, X_lim, Y0, Y_lim)      
-        # Layout horizontal pour les limites de l'axe X
-        self.xlim_layout = QHBoxLayout()
-        self.control_layout.addLayout(self.xlim_layout)
+        self.control_layout.addWidget(params_widget)
 
+
+        # --- BLOC 2 : LIMITES / ZOOM (GRILLE COMPACTE) ---
+        limits_group = QGroupBox("Zoom / Découpage")
+        limits_grid = QGridLayout()
+        limits_grid.setContentsMargins(5, 5, 5, 5)
+        limits_grid.setVerticalSpacing(5)
+
+        # X Limits
         self.label_x0 = QLabel("X0:")
-        self.xlim_layout.addWidget(self.label_x0)
-        self.line_edit_x0 = QLineEdit()
-        self.line_edit_x0.setPlaceholderText("Début X")
-        self.line_edit_x0.setText("0.0")
+        self.line_edit_x0 = QLineEdit("0.0")
         self.line_edit_x0.setValidator(self.float_validator)
-        self.xlim_layout.addWidget(self.line_edit_x0)
-        self.line_edit_x0.editingFinished.connect(self.on_x0_edited)
-        self.line_edit_x0.returnPressed.connect(self.on_x0_edited)
-
+        
         self.label_xlim = QLabel("X_lim:")
-        self.xlim_layout.addWidget(self.label_xlim)
         self.line_edit_xlim = QLineEdit()
-        self.line_edit_xlim.setPlaceholderText("Fin X")
+        self.line_edit_xlim.setPlaceholderText("Max")
         self.line_edit_xlim.setValidator(self.float_validator)
-        self.xlim_layout.addWidget(self.line_edit_xlim)
-        self.line_edit_xlim.editingFinished.connect(self.on_xlim_edited)
-        self.line_edit_xlim.returnPressed.connect(self.on_xlim_edited)
 
-        # Layout horizontal pour les limites de l'axe Y
-        self.ylim_layout = QHBoxLayout()
-        self.control_layout.addLayout(self.ylim_layout)
+        limits_grid.addWidget(self.label_x0, 0, 0)
+        limits_grid.addWidget(self.line_edit_x0, 0, 1)
+        limits_grid.addWidget(self.label_xlim, 0, 2)
+        limits_grid.addWidget(self.line_edit_xlim, 0, 3)
 
+        # Y Limits + Bouton Auto
         self.label_y0 = QLabel("Y0:")
-        self.ylim_layout.addWidget(self.label_y0)
-        self.line_edit_y0 = QLineEdit()
-        self.line_edit_y0.setPlaceholderText("Début Y")
-        self.line_edit_y0.setText("0.0")
+        self.line_edit_y0 = QLineEdit("0.0")
         self.line_edit_y0.setValidator(self.float_validator)
-        self.ylim_layout.addWidget(self.line_edit_y0)
 
         self.btn_auto_t0 = QPushButton("Auto")
-        self.btn_auto_t0.setToolTip("Détecter automatiquement la première arrivée (T0)")
-        self.ylim_layout.addWidget(self.btn_auto_t0)
+        self.btn_auto_t0.setFixedWidth(40)
+        self.btn_auto_t0.setToolTip("Détecter le sol (T0)")
+        
+        # On met Y0 et le bouton Auto côte à côte
+        y0_box = QHBoxLayout()
+        y0_box.setContentsMargins(0,0,0,0)
+        y0_box.setSpacing(2)
+        y0_box.addWidget(self.line_edit_y0)
+        y0_box.addWidget(self.btn_auto_t0)
+
+        self.label_ylim = QLabel("Y_lim:")
+        self.line_edit_ylim = QLineEdit()
+        self.line_edit_ylim.setPlaceholderText("Max")
+        self.line_edit_ylim.setValidator(self.float_validator)
+
+        limits_grid.addWidget(self.label_y0, 1, 0)
+        limits_grid.addLayout(y0_box, 1, 1) # Attention : addLayout ici
+        limits_grid.addWidget(self.label_ylim, 1, 2)
+        limits_grid.addWidget(self.line_edit_ylim, 1, 3)
+
+        limits_group.setLayout(limits_grid)
+        self.control_layout.addWidget(limits_group)
 
 
+        # --- CONNEXIONS DES SIGNAUX (RECONNECTER TOUT ICI) ---
+        self.combo_box_extension.currentTextChanged.connect(self.on_extension_changed)
+        self.combo_box_frequence.currentTextChanged.connect(self.on_secondary_filter_changed)
+        self.slider_contrast.valueChanged.connect(self.on_contrast_slider_changed)
+        self.line_edit_distance.editingFinished.connect(self.on_distance_edited)
+        self.line_edit_epsilon.editingFinished.connect(self.on_epsilon_edited)
+        self.combo_box_unit_x.currentTextChanged.connect(self.on_unit_x_changed)
+        self.combo_box_unit_y.currentTextChanged.connect(self.on_unit_y_changed)
+        
+        self.line_edit_x0.editingFinished.connect(self.on_x0_edited)
+        self.line_edit_x0.returnPressed.connect(self.on_x0_edited)
+        self.line_edit_xlim.editingFinished.connect(self.on_xlim_edited)
+        self.line_edit_xlim.returnPressed.connect(self.on_xlim_edited)
+        
         self.line_edit_y0.editingFinished.connect(self.on_y0_edited)
         self.line_edit_y0.returnPressed.connect(self.on_y0_edited)
         self.btn_auto_t0.clicked.connect(self.on_auto_t0_clicked)
-
-        self.label_ylim = QLabel("Y_lim:")
-        self.ylim_layout.addWidget(self.label_ylim)
-        self.line_edit_ylim = QLineEdit()
-        self.line_edit_ylim.setPlaceholderText("Fin Y")
-        self.line_edit_ylim.setValidator(self.float_validator)
-        self.ylim_layout.addWidget(self.line_edit_ylim)
         self.line_edit_ylim.editingFinished.connect(self.on_ylim_edited)
         self.line_edit_ylim.returnPressed.connect(self.on_ylim_edited)
 
-    # ---
-        ## Section Multi-pages (QTabWidget)
-        self.tab_widget = QTabWidget()
-        self.control_layout.addWidget(self.tab_widget) # Ajoute le QTabWidget au layout principal
 
-        # Création et ajout de la première page (Paramètres de Gain)
+        # --- BLOC 3 : ONGLETS DE TRAITEMENT ---
+        self.tab_widget = QTabWidget()
+        self.control_layout.addWidget(self.tab_widget)
+
         self.gain_page = self.create_gain_page()
         self.tab_widget.addTab(self.gain_page, "Gains")
 
-        # Création et ajout de la  page (Filtres)
         self.filter_page = self.create_filter_page()
         self.tab_widget.addTab(self.filter_page, "Filtres")
 
-        # Création et ajout de la page (Options)
         self.options_page = self.create_options_page()
         self.tab_widget.addTab(self.options_page, "Options")
-        # -------------------------
-
+        
         self.annotation_page = self._create_annotation_page()
-        self.tab_widget.addTab(self.annotation_page, "Annotations")
+        self.tab_widget.addTab(self.annotation_page, "Notes")
 
-        # Création et ajout de la page (Infos)
         self.info_page = self.create_info_page()
         self.tab_widget.addTab(self.info_page, "Infos")
 
-        #---- Pointeur
-        # Création d'un cadre pour séparer visuellement
+
+        # --- BLOC 4 : POINTEUR (Tout en bas) ---
         coord_frame = QFrame()
         coord_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        coord_frame.setStyleSheet("background-color: #f0f0f0; border-radius: 5px; margin-top: 5px;")
         coord_frame_layout = QVBoxLayout(coord_frame)
+        coord_frame_layout.setContentsMargins(2, 2, 2, 2)
         
-        # Label pour les coordonnées
         self.coord_label = QLabel("X: -- | Y: --")
-        self.coord_label.setAlignment(Qt.AlignmentFlag.AlignCenter) # Centrer le texte
+        self.coord_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.coord_label.setStyleSheet("font-weight: bold; color: #333;")
         coord_frame_layout.addWidget(self.coord_label)
-
-        # On ajoute ce cadre au layout principal du panneau de contrôle
+        
         self.control_layout.addWidget(coord_frame)
-        #----------------------------
-        # Ajoutez un espaceur pour pousser les éléments vers le haut si nécessaire
-        self.control_layout.addStretch()
-
+        
     def on_simplified_mode_toggled(self, checked: bool):
         """Gère le changement d'état du mode simplifié."""
         print(f"Mode simplifié {'activé' if checked else 'désactivé'}.")
@@ -1528,37 +1486,49 @@ class MainWindow():
         self.update_display()
 
     def _update_ui_for_mode(self):
-        """Active ou désactive les widgets avancés en fonction du mode."""
+        """
+        Active ou désactive les widgets avancés en fonction du mode.
+        Mise à jour pour l'interface optimisée.
+        """
         is_simplified = self.is_simplified_mode
         
-        # On rend les widgets avancés INVISIBLES en mode simplifié
-        # C'est plus propre que de juste les désactiver.
-        
         # 1. Gains manuels
-        self.manual_gain_container.setVisible(not is_simplified)
-        self.label_auto_gain.setVisible(not is_simplified)
-        # trace moyenne
-        self.combo_sub_mean_mode.setVisible(not is_simplified)
-        self.globale_options_widget.setVisible(not is_simplified)
-        self.label_mode.setVisible(not is_simplified)
-        self.label_submean.setVisible(not is_simplified)
-        # 2. Filtre fréquentiel et Déconvolution (qui sont dans la page "Filtres")
-        self.freq_filter_container.setVisible(not is_simplified)
+        # On cache tout le groupe "Gains Manuels"
+        if hasattr(self, 'manual_gain_container'):
+            self.manual_gain_container.setVisible(not is_simplified)
 
-        # On cherche le QGroupBox de la déconvolution pour le cacher
-        deconv_groupbox = self.btn_apply_deconv.parent()
-        if isinstance(deconv_groupbox, QGroupBox):
-            deconv_groupbox.setVisible(not is_simplified)
+        # 2. Filtres
+        # On cache les paramètres avancés du filtre fréquentiel (Sampling, Antenna)
+        if hasattr(self, 'freq_filter_container'):
+            self.freq_filter_container.setVisible(not is_simplified)
+
+        # On cache le choix du mode de retrait de trace (Globale/Mobile)
+        # En mode simplifié, c'est automatique (Globale)
+        if hasattr(self, 'combo_sub_mean_mode'):
+             self.combo_sub_mean_mode.setVisible(not is_simplified)
+        if hasattr(self, 'label_mode'):
+             self.label_mode.setVisible(not is_simplified)
+        if hasattr(self, 'globale_options_widget'):
+             self.globale_options_widget.setVisible(not is_simplified)
         
-        # interpolation 
-        self.interpolation_container.setVisible(not is_simplified)
+        # On cache la Déconvolution (Spiking)
+        # Astuce : on cache le conteneur parent du bouton (le GroupBox)
+        if hasattr(self, 'btn_apply_deconv'):
+            try:
+                # Le parent du bouton est le QGroupBox "Déconvolution"
+                self.btn_apply_deconv.parent().setVisible(not is_simplified)
+            except:
+                pass
 
-        #Decimate
-        #self.decimation_container.setVisible(not is_simplified)
-        # Auto-Trim
-        self.autotrim_container.setVisible(not is_simplified)
-        # IMPORTANT: On met à jour l'état des gains auto/manuels
-        # pour s'assurer que tout est cohérent.
+        # 3. Options (Interpolation, Décimation)
+        if hasattr(self, 'interpolation_container'):
+            self.interpolation_container.setVisible(not is_simplified)
+            
+        # 4. Auto-Trim
+        if hasattr(self, 'autotrim_container'):
+             self.autotrim_container.setVisible(not is_simplified)
+
+        # 5. Mise à jour de la logique des gains (Griser/Dégriser)
         self._update_gain_controls_state()
 
     def redraw_plot(self):
@@ -1617,108 +1587,103 @@ class MainWindow():
             self.cscan_window.run_full_processing()
 
     def create_gain_page(self):
-        """Crée et retourne la page des paramètres de gain, sans GroupBox."""
+        """Crée et retourne la page des paramètres de gain, optimisée avec une grille."""
         gain_widget = QWidget()
         gain_layout = QVBoxLayout(gain_widget)
+        gain_layout.setContentsMargins(5, 5, 5, 5)
+        gain_layout.setSpacing(10)
 
-        self.manual_gain_container = QWidget()
-        manual_gain_layout = QVBoxLayout(self.manual_gain_container)
-        manual_gain_layout.setContentsMargins(0, 0, 0, 0) # Pour un alignement parfait
+        # --- BLOC 1 : GAINS MANUELS ---
+        self.manual_gain_container = QGroupBox("Gains Manuels")
+        manual_grid = QGridLayout(self.manual_gain_container)
+        manual_grid.setContentsMargins(5, 10, 5, 5)
+        manual_grid.setVerticalSpacing(8)
+        
+        self.manual_gain_widgets = [] # Pour la gestion activé/désactivé
 
-
-
-        # --- Gains Manuels ---
-        self.manual_gain_widgets = []
-
-        # On crée les QLineEdit une seule fois
+        # 1. Gain Constant
+        label_g = QLabel("Constant (g):")
         self.line_edit_g = QLineEdit("1.0")
+        self.line_edit_g.setValidator(self.float_validator)
+        self.manual_gain_widgets.append(self.line_edit_g)
+        
+        # On le place sur toute la largeur ou au début
+        manual_grid.addWidget(label_g, 0, 0)
+        manual_grid.addWidget(self.line_edit_g, 0, 1)
+
+        # 2. Gain Linéaire (a_lin et t0_lin côte à côte)
+        label_alin = QLabel("Lin (a):")
         self.line_edit_a_lin = QLineEdit("0.0")
+        self.line_edit_a_lin.setValidator(self.float_validator)
+        self.manual_gain_widgets.append(self.line_edit_a_lin)
+
+        label_t0lin = QLabel("Départ (t0):")
         self.line_edit_t0_lin = QLineEdit("0.0")
+        self.line_edit_t0_lin.setValidator(self.float_validator)
+        self.manual_gain_widgets.append(self.line_edit_t0_lin)
+
+        manual_grid.addWidget(label_alin, 1, 0)
+        manual_grid.addWidget(self.line_edit_a_lin, 1, 1)
+        manual_grid.addWidget(label_t0lin, 1, 2)
+        manual_grid.addWidget(self.line_edit_t0_lin, 1, 3)
+
+        # 3. Gain Exponentiel (a_exp et T0_exp côte à côte)
+        label_aexp = QLabel("Exp (a):")
         self.line_edit_a_exp = QLineEdit("1.0")
+        self.line_edit_a_exp.setValidator(self.float_validator)
+        self.manual_gain_widgets.append(self.line_edit_a_exp)
+
+        label_t0exp = QLabel("Départ (T0):")
         self.line_edit_T0_exp = QLineEdit("0.0")
+        self.line_edit_T0_exp.setValidator(self.float_validator)
+        self.manual_gain_widgets.append(self.line_edit_T0_exp)
+
+        manual_grid.addWidget(label_aexp, 2, 0)
+        manual_grid.addWidget(self.line_edit_a_exp, 2, 1)
+        manual_grid.addWidget(label_t0exp, 2, 2)
+        manual_grid.addWidget(self.line_edit_T0_exp, 2, 3)
+
+        # 4. Limite Exponentielle
+        label_tmax = QLabel("Fin Exp (sample):")
         self.line_edit_t_max_exp = QLineEdit("0")
+        self.line_edit_t_max_exp.setValidator(self.float_validator)
+        self.manual_gain_widgets.append(self.line_edit_t_max_exp)
 
-        # On définit TOUTE la structure de l'interface dans cette liste
-        manual_gain_config = [
-            ("Gain constant", None, None), # Sous-titre
-            ("g:", self.line_edit_g, "Coefficient g constant"),
-            ("Gain Linéaire", None, None), # Sous-titre
-            ("a_lin:", self.line_edit_a_lin, "Amplitude linéaire"),
-            ("t0_lin:", self.line_edit_t0_lin, "Temps initial linéaire"),
-            ("Gain Exponentiel", None, None), # Sous-titre
-            ("a_exp:", self.line_edit_a_exp, "Amplitude exponentielle"),
-            ("T0_exp:", self.line_edit_T0_exp, "Temps initial exponentiel"),
-            ("t_max_exp:", self.line_edit_t_max_exp, "Fin du gain expo (sample)")
-        ]
+        manual_grid.addWidget(label_tmax, 3, 0)
+        manual_grid.addWidget(self.line_edit_t_max_exp, 3, 1)
 
-        # # La boucle crée maintenant l'interface à partir de la config
-        # for label_text, line_edit, placeholder in manual_gain_config:
-        #     # Si c'est un sous-titre (pas d'objet QLineEdit associé)
-        #     if line_edit is None:
-        #         label = QLabel(label_text)
-        #         label.setStyleSheet("font-style: italic; font-size: 11pt; margin-top: 2px;")
-        #         gain_layout.addWidget(label)
-        #     # Sinon, c'est un champ de saisie normal
-        #     else:
-        #         h_layout = QHBoxLayout()
-        #         h_layout.addWidget(QLabel(label_text))
-        #         line_edit.setPlaceholderText(placeholder)
-        #         line_edit.setValidator(self.float_validator)
-        #         h_layout.addWidget(line_edit)
-        #         gain_layout.addLayout(h_layout)
-        #         self.manual_gain_widgets.append(line_edit) # On ajoute à la liste pour le contrôle
-
-        # --- Section des Gains Manuels ---
-        label_manual_gain = QLabel("--- Gains Manuels ---")
-        label_manual_gain.setStyleSheet("font-weight: bold;")
-        manual_gain_layout.addWidget(label_manual_gain)
-
-        for label_text, line_edit, placeholder in manual_gain_config:
-            if line_edit is None: # Si c'est un sous-titre
-                label = QLabel(label_text)
-                label.setStyleSheet("font-style: italic; font-size: 11pt; margin-top: 2px;")
-                manual_gain_layout.addWidget(label) # Ajout au layout du conteneur
-            else: # Sinon, c'est un champ de saisie
-                h_layout = QHBoxLayout()
-                h_layout.addWidget(QLabel(label_text))
-                line_edit.setPlaceholderText(placeholder)
-                line_edit.setValidator(self.float_validator)
-                h_layout.addWidget(line_edit)
-                manual_gain_layout.addLayout(h_layout) # Ajout au layout du conteneur
-                self.manual_gain_widgets.append(line_edit)
-
-        # 3. On ajoute le conteneur UNIQUE au layout principal de la page
+        # Ajout du groupe manuel au layout principal
         gain_layout.addWidget(self.manual_gain_container)
-        #gain_layout.addSpacing(15)
 
+        # --- BLOC 2 : GAINS AUTOMATIQUES ---
+        auto_group = QGroupBox("Gains Automatiques")
+        auto_grid = QGridLayout(auto_group)
+        auto_grid.setContentsMargins(5, 10, 5, 5)
 
-        # --- Section des Gains Automatiques ---
-        self.label_auto_gain = QLabel("--- Gains Automatiques ---")
-        self.label_auto_gain.setStyleSheet("font-weight: bold; margin-top: 15px;")
-        gain_layout.addWidget(self.label_auto_gain)
-
-        # Création des widgets de gain automatique
-        self.checkbox_agc = QCheckBox("Gain automatique (AGC)")
+        # 1. AGC (Checkbox + Paramètre sur la même ligne)
+        self.checkbox_agc = QCheckBox("AGC")
+        label_agc_win = QLabel("Fenêtre (px):")
         self.line_edit_agc_window = QLineEdit(str(self.basalt.traitementValues.agc_window_size))
-        self.checkbox_normalization = QCheckBox("Normalisation par trace")
-        self.checkbox_energy_decay = QCheckBox("Compensation de la décroissance d'énergie")
-
-        # Ajout des widgets AGC au layout
-        gain_layout.addWidget(self.checkbox_agc)
-        agc_options_layout = QHBoxLayout()
-        agc_options_layout.addWidget(QLabel("Fenêtre AGC (samples):"))
+        self.line_edit_agc_window.setFixedWidth(60)
         self.line_edit_agc_window.setValidator(QDoubleValidator(1, 4096, 0))
-        agc_options_layout.addWidget(self.line_edit_agc_window)
-        gain_layout.addLayout(agc_options_layout)
-        gain_layout.addSpacing(10)
 
-        # Ajout des autres widgets auto
-        gain_layout.addWidget(self.checkbox_normalization)
-        gain_layout.addWidget(self.checkbox_energy_decay)
+        auto_grid.addWidget(self.checkbox_agc, 0, 0)
+        auto_grid.addWidget(label_agc_win, 0, 2) # Colonne 2 pour espacer un peu
+        auto_grid.addWidget(self.line_edit_agc_window, 0, 3)
 
-        gain_layout.addStretch()
+        # 2. Normalisation
+        self.checkbox_normalization = QCheckBox("Normalisation par trace")
+        auto_grid.addWidget(self.checkbox_normalization, 1, 0, 1, 4) # Prend toute la largeur
 
-        # --- Connexion des signaux (une fois que TOUT est créé) ---
+        # 3. Décroissance d'énergie
+        self.checkbox_energy_decay = QCheckBox("Compens. Décroissance Énergie")
+        auto_grid.addWidget(self.checkbox_energy_decay, 2, 0, 1, 4)
+
+        # Ajout du groupe auto au layout principal
+        gain_layout.addWidget(auto_group)
+
+
+        # --- CONNEXIONS DES SIGNAUX ---
         self.line_edit_g.editingFinished.connect(self.on_g_edited)
         self.line_edit_a_lin.editingFinished.connect(self.on_a_lin_edited)
         self.line_edit_t0_lin.editingFinished.connect(self.on_t0_lin_edited)
@@ -1731,157 +1696,150 @@ class MainWindow():
         self.checkbox_normalization.stateChanged.connect(self.on_normalization_toggled)
         self.checkbox_energy_decay.stateChanged.connect(self.on_energy_decay_toggled)
 
-        # --- Mise à jour initiale de l'état (tout à la fin) ---
+        # Stretch final pour tasser vers le haut
+        gain_layout.addStretch()
+
+        # Mise à jour de l'état initial (grisé ou non)
         self._update_gain_controls_state()
 
         return gain_widget
-
     
     def create_filter_page(self):
-        """Crée et retourne la page des paramètres de filtre."""
+        """Crée et retourne la page des paramètres de filtre, optimisée."""
         filter_widget = QWidget()
         filter_layout = QVBoxLayout(filter_widget)
+        filter_layout.setContentsMargins(5, 5, 5, 5)
+        filter_layout.setSpacing(10)
 
-        # Section Dewow
-        dewow_layout = QHBoxLayout()
-        self.checkbox_dewow = QCheckBox("Activer dewow")
-        self.checkbox_dewow.setChecked(False) 
+        # --- BLOC 1 : FILTRES DE BASE (Dewow et Fréquence) ---
+        basic_group = QGroupBox("Filtres de Base")
+        basic_grid = QGridLayout(basic_group)
+        basic_grid.setContentsMargins(5, 10, 5, 5)
+        basic_grid.setVerticalSpacing(8)
+
+        # 1. Dewow
+        self.checkbox_dewow = QCheckBox("Dewow")
         self.checkbox_dewow.stateChanged.connect(self.on_dewow_toggled)
-        dewow_layout.addWidget(self.checkbox_dewow)
-        dewow_layout.addStretch() # Pousse le checkbox à gauche
-        filter_layout.addLayout(dewow_layout)
+        basic_grid.addWidget(self.checkbox_dewow, 0, 0, 1, 2) # Span sur 2 colonnes
 
-        # --- Retrait de la Trace Moyenne ---
-        self.label_submean = QLabel("--- Retrait de la Trace Moyenne ---")
-        self.label_submean.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        filter_layout.addWidget(self.label_submean)
+        # 2. Filtre Fréquentiel
+        self.checkbox_filtre_freq = QCheckBox("Filtre Fréquence")
+        self.checkbox_filtre_freq.stateChanged.connect(self.on_filtre_freq_changed)
+        basic_grid.addWidget(self.checkbox_filtre_freq, 1, 0, 1, 2)
+        
+        # Nous allons créer un sous-conteneur pour les paramètres de fréquence
+        # afin de pouvoir les cacher ensemble proprement.
+        self.freq_filter_container = QWidget()
+        freq_layout = QGridLayout(self.freq_filter_container)
+        freq_layout.setContentsMargins(0,0,0,0)
+        
+        freq_layout.addWidget(QLabel("Sampling:"), 0, 0)
+        self.line_edit_freq_filtre = QLineEdit()
+        self.line_edit_freq_filtre.setValidator(self.float_validator)
+        self.line_edit_freq_filtre.editingFinished.connect(self.on_freq_filtre_edited)
+        freq_layout.addWidget(self.line_edit_freq_filtre, 0, 1)
+        
+        freq_layout.addWidget(QLabel("Antenna:"), 0, 2)
+        self.line_edit_antenna_freq = QLineEdit()
+        self.line_edit_antenna_freq.setValidator(self.float_validator)
+        self.line_edit_antenna_freq.editingFinished.connect(self.on_cuttoff_freq_edited)
+        freq_layout.addWidget(self.line_edit_antenna_freq, 0, 3)
+        
+        # On ajoute ce conteneur à la grille principale du groupe
+        basic_grid.addWidget(self.freq_filter_container, 2, 0, 1, 4)
+        
+        filter_layout.addWidget(basic_group)
 
-        self.checkbox_sub_mean = QCheckBox("Activer le retrait de trace moyenne")
-        filter_layout.addWidget(self.checkbox_sub_mean)
 
-        # Layout pour les options qui vont changer dynamiquement
-        sub_mean_options_layout = QHBoxLayout()
-        # Widget pour les options du mode "Mobile"
-        self.mobile_options_widget = QWidget()
-        mobile_layout = QHBoxLayout(self.mobile_options_widget)
-        mobile_layout.setContentsMargins(0,0,0,0)
-        mobile_layout.addWidget(QLabel("Fenêtre :"))
-        self.line_edit_sub_mean_window = QLineEdit(str(self.basalt.traitementValues.sub_mean_window))
-        self.line_edit_sub_mean_window.setValidator(QDoubleValidator(1, 1001, 0))
-        mobile_layout.addWidget(self.line_edit_sub_mean_window)
-
-        # Widget pour les options du mode "Globale"
-        self.globale_options_widget = QWidget()
-        globale_layout = QHBoxLayout(self.globale_options_widget)
-        globale_layout.setContentsMargins(0,0,0,0)
-        globale_layout.addWidget(QLabel("Élagage (%) :"))
-        self.line_edit_trim_percent = QLineEdit(str(self.basalt.traitementValues.sub_mean_trim_percent))
-        self.line_edit_trim_percent.setValidator(QDoubleValidator(0, 49, 1)) # De 0% à 49%
-        globale_layout.addWidget(self.line_edit_trim_percent)
-
-        # On ajoute le choix du mode et les deux widgets d'options au layout
-        self.label_mode = QLabel("Mode :")
-        sub_mean_options_layout.addWidget(self.label_mode)
+        # --- BLOC 2 : RETRAIT DE TRACE (SUB-MEAN) ---
+        submean_group = QGroupBox("Retrait de Trace Moyenne")
+        submean_grid = QGridLayout(submean_group)
+        submean_grid.setContentsMargins(5, 10, 5, 5)
+        
+        # Checkbox
+        self.checkbox_sub_mean = QCheckBox("Activer")
+        self.checkbox_sub_mean.stateChanged.connect(self.on_sub_mean_toggled)
+        submean_grid.addWidget(self.checkbox_sub_mean, 0, 0)
+        
+        # Mode (Globale/Mobile)
+        self.label_mode = QLabel("Mode:")
         self.combo_sub_mean_mode = QComboBox()
         self.combo_sub_mean_mode.addItems(["Globale", "Mobile"])
-        sub_mean_options_layout.addWidget(self.combo_sub_mean_mode)
-        sub_mean_options_layout.addWidget(self.globale_options_widget)
-        sub_mean_options_layout.addWidget(self.mobile_options_widget)
-        sub_mean_options_layout.addStretch()
+        self.combo_sub_mean_mode.currentIndexChanged.connect(self.on_sub_mean_mode_changed)
+        
+        submean_grid.addWidget(self.label_mode, 0, 1)
+        submean_grid.addWidget(self.combo_sub_mean_mode, 0, 2)
 
-        filter_layout.addLayout(sub_mean_options_layout)
-
-        # On initialise la visibilité et l'état "activé"
+        # Paramètres Dynamiques (Globale vs Mobile)
+        # Widget Mobile
+        self.mobile_options_widget = QWidget()
+        mob_layout = QHBoxLayout(self.mobile_options_widget)
+        mob_layout.setContentsMargins(0,0,0,0)
+        mob_layout.addWidget(QLabel("Fenêtre:"))
+        self.line_edit_sub_mean_window = QLineEdit(str(self.basalt.traitementValues.sub_mean_window))
+        self.line_edit_sub_mean_window.setValidator(QDoubleValidator(1, 1001, 0))
+        self.line_edit_sub_mean_window.editingFinished.connect(self.on_sub_mean_window_edited)
+        mob_layout.addWidget(self.line_edit_sub_mean_window)
+        
+        # Widget Globale
+        self.globale_options_widget = QWidget()
+        glob_layout = QHBoxLayout(self.globale_options_widget)
+        glob_layout.setContentsMargins(0,0,0,0)
+        glob_layout.addWidget(QLabel("Élagage (%):"))
+        self.line_edit_trim_percent = QLineEdit(str(self.basalt.traitementValues.sub_mean_trim_percent))
+        self.line_edit_trim_percent.setValidator(QDoubleValidator(0, 49, 1))
+        self.line_edit_trim_percent.editingFinished.connect(self.on_trim_percent_edited)
+        glob_layout.addWidget(self.line_edit_trim_percent)
+        
+        # On ajoute les deux widgets au même endroit (ligne 1), ils s'afficheront/cacheront
+        submean_grid.addWidget(self.mobile_options_widget, 1, 0, 1, 3)
+        submean_grid.addWidget(self.globale_options_widget, 1, 0, 1, 3)
+        
+        # Initialisation de l'état
         self.checkbox_sub_mean.setChecked(False)
         self.combo_sub_mean_mode.setEnabled(False)
         self.globale_options_widget.setEnabled(False)
-        self.mobile_options_widget.setEnabled(False)
-        self.mobile_options_widget.setVisible(False) # Caché au départ car "Globale" est sélectionné
-
-        # Connexion des signaux
-        self.checkbox_sub_mean.stateChanged.connect(self.on_sub_mean_toggled)
-        self.combo_sub_mean_mode.currentIndexChanged.connect(self.on_sub_mean_mode_changed)
-        self.line_edit_sub_mean_window.editingFinished.connect(self.on_sub_mean_window_edited)
-        self.line_edit_trim_percent.editingFinished.connect(self.on_trim_percent_edited) # <-- Nouvelle connexion
-
-        # --- Filtre Fréquentiel (dans un conteneur) ---
+        self.mobile_options_widget.setVisible(False) # Caché par défaut
         
-        # 1. On crée un widget qui servira de conteneur pour toute la section
-        self.freq_filter_container = QWidget()
-        container_layout = QVBoxLayout(self.freq_filter_container)
-        container_layout.setContentsMargins(0, 0, 0, 0) # Pour éviter les marges inutiles
+        filter_layout.addWidget(submean_group)
 
-        # Le reste de votre code est identique, mais on ajoute les éléments au 'container_layout'
-        label_freq_filter = QLabel("--- Filtre fréquentiel ---")
-        label_freq_filter.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        container_layout.addWidget(label_freq_filter)
+
+        # --- BLOC 3 : DÉCONVOLUTION ---
+        deconv_group = QGroupBox("Déconvolution (Spiking)")
+        deconv_grid = QGridLayout(deconv_group)
+        deconv_grid.setContentsMargins(5, 10, 5, 5)
         
-        self.checkbox_filtre_freq = QCheckBox("Activer le filtre fréquentiel")
-        self.checkbox_filtre_freq.setChecked(False)
-        self.checkbox_filtre_freq.stateChanged.connect(self.on_filtre_freq_changed)
-        container_layout.addWidget(self.checkbox_filtre_freq)
-
-        freq_filtre_layout = QHBoxLayout()
-        freq_filtre_layout.addWidget(QLabel("Sampling freq:"))
-        self.line_edit_freq_filtre = QLineEdit()
-        self.line_edit_freq_filtre.setPlaceholderText("Fréquence d'acquisition")
-        self.line_edit_freq_filtre.setValidator(self.float_validator)
-        self.line_edit_freq_filtre.editingFinished.connect(self.on_freq_filtre_edited)
-        freq_filtre_layout.addWidget(self.line_edit_freq_filtre)
-        container_layout.addLayout(freq_filtre_layout)
-
-        antenna_freq_layout = QHBoxLayout()
-        antenna_freq_layout.addWidget(QLabel("Antenna freq (MHz):"))
-        self.line_edit_antenna_freq = QLineEdit()
-        self.line_edit_antenna_freq.setPlaceholderText("Fréquence de l'antenne")
-        self.line_edit_antenna_freq.setValidator(self.float_validator)
-        self.line_edit_antenna_freq.editingFinished.connect(self.on_cuttoff_freq_edited)
-        antenna_freq_layout.addWidget(self.line_edit_antenna_freq)
-        container_layout.addLayout(antenna_freq_layout)
-
-        # 2. On ajoute le conteneur UNIQUE au layout principal de la page "Filtres"
-        filter_layout.addWidget(self.freq_filter_container)
-
-        filter_layout.addStretch() # Pousse les éléments vers le haut
-
-        filter_layout.addSpacing(20)
-
-
-        # --- NOUVEAU BLOC : DÉCONVOLUTION ---
-        deconv_groupbox = QGroupBox("Déconvolution (Spiking)")
-        deconv_layout = QVBoxLayout(deconv_groupbox)
-
-        # Paramètres pour l'estimation de l'ondelette
-        wavelet_layout = QHBoxLayout()
-        wavelet_layout.addWidget(QLabel("Ondelette (samples):"))
-        self.line_edit_wavelet_start = QLineEdit("10") # Début de l'ondelette
-        self.line_edit_wavelet_end = QLineEdit("60")   # Fin de l'ondelette
-        wavelet_layout.addWidget(self.line_edit_wavelet_start)
-        wavelet_layout.addWidget(self.line_edit_wavelet_end)
-        deconv_layout.addLayout(wavelet_layout)
-
-        # Paramètre pour la régularisation (bruit)
-        noise_layout = QHBoxLayout()
-        noise_layout.addWidget(QLabel("Bruit (%):"))
-        self.line_edit_deconv_noise = QLineEdit("1.0") # 1% de bruit blanc
-        noise_layout.addWidget(self.line_edit_deconv_noise)
-        deconv_layout.addLayout(noise_layout)
-
-        # Bouton pour lancer le traitement
-        self.btn_apply_deconv = QPushButton("Appliquer la Déconvolution")
-        self.btn_apply_deconv.setToolTip("Améliore la résolution verticale. Utiliser après le gain.")
-        deconv_layout.addWidget(self.btn_apply_deconv)
+        # Ondelette
+        deconv_grid.addWidget(QLabel("Ondelette (start/end):"), 0, 0)
+        self.line_edit_wavelet_start = QLineEdit("10")
+        self.line_edit_wavelet_end = QLineEdit("60")
+        self.line_edit_wavelet_start.setFixedWidth(40)
+        self.line_edit_wavelet_end.setFixedWidth(40)
         
-        filter_layout.addWidget(deconv_groupbox)
-        # --- FIN DU BLOC DECONVOLUTION ---
+        wavelet_box = QHBoxLayout()
+        wavelet_box.addWidget(self.line_edit_wavelet_start)
+        wavelet_box.addWidget(self.line_edit_wavelet_end)
+        wavelet_box.addStretch()
+        deconv_grid.addLayout(wavelet_box, 0, 1)
 
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        filter_layout.addWidget(line)
+        # Bruit
+        deconv_grid.addWidget(QLabel("Bruit (%):"), 1, 0)
+        self.line_edit_deconv_noise = QLineEdit("1.0")
+        self.line_edit_deconv_noise.setFixedWidth(40)
+        deconv_grid.addWidget(self.line_edit_deconv_noise, 1, 1)
+        
+        # Bouton Appliquer
+        self.btn_apply_deconv = QPushButton("Appliquer")
+        self.btn_apply_deconv.clicked.connect(self.on_deconvolution_clicked)
+        deconv_grid.addWidget(self.btn_apply_deconv, 2, 0, 1, 2)
+        
+        filter_layout.addWidget(deconv_group)
 
+        # Stretch final
+        filter_layout.addStretch()
+        
         return filter_widget
-
+    
     def create_info_page(self):
         pass
 
@@ -2048,81 +2006,85 @@ class MainWindow():
             freq_key=freq_key
         )
 
-   # DANS LA CLASSE MainWindow
-
     def _create_annotation_page(self):
-        """Crée la page de l'interface pour les annotations (Points, Zones, Interfaces)."""
+        """Crée la page Annotations avec tous les outils regroupés dans une seule boîte."""
         annotation_widget = QWidget()
         layout = QVBoxLayout(annotation_widget)
+        layout.setContentsMargins(5, 5, 5, 5)
         
-        # --- Outils de dessin ---
-        tools_group = QGroupBox("Outils")
-        tools_layout = QGridLayout() 
-        
-        # Bouton Point
+        # --- GROUPE DÉDIÉ : OUTILS DE DESSIN (La zone encerclée en rouge) ---
+        tools_group = QGroupBox("Outils de Dessin")
+        # On utilise une grille pour un alignement parfait
+        tools_grid = QGridLayout(tools_group)
+        tools_grid.setContentsMargins(5, 10, 5, 5)
+        tools_grid.setVerticalSpacing(8) # Un peu d'espace entre les lignes
+
+        # Ligne 0 : Les 3 outils principaux
         self.btn_add_point = QPushButton("Point")
         self.btn_add_point.setCheckable(True)
         self.btn_add_point.clicked.connect(self.on_tool_point_clicked)
         
-        # Bouton Zone
         self.btn_add_box = QPushButton("Zone")
         self.btn_add_box.setCheckable(True)
         self.btn_add_box.clicked.connect(self.on_tool_box_clicked)
 
-        # Bouton Interface (Manuel)
         self.btn_add_layer = QPushButton("Interface")
         self.btn_add_layer.setCheckable(True)
         self.btn_add_layer.clicked.connect(self.on_tool_layer_clicked)
 
-        # --- AJOUT : Bouton Auto-Track ---
-        # On utilise QPushButton au lieu de QAction pour l'afficher dans l'onglet
+        tools_grid.addWidget(self.btn_add_point, 0, 0)
+        tools_grid.addWidget(self.btn_add_box, 0, 1)
+        tools_grid.addWidget(self.btn_add_layer, 0, 2)
+
+        # Ligne 1 : Auto-Track (Prend toute la largeur)
         self.btn_autotrack = QPushButton("Auto-Track (Beta)")
         self.btn_autotrack.setCheckable(True)
         self.btn_autotrack.clicked.connect(self.activate_autotrack_mode)
-        self.btn_autotrack.setStyleSheet("background-color: #e1f5fe; color: #0277bd;") # Un peu de style pour le distinguer
-        # ---------------------------------
+        self.btn_autotrack.setStyleSheet("background-color: #e1f5fe; color: #01579b; font-weight: bold;")
+        tools_grid.addWidget(self.btn_autotrack, 1, 0, 1, 3)
 
-        # Placement dans la grille (Ligne 0)
-        tools_layout.addWidget(self.btn_add_point, 0, 0)
-        tools_layout.addWidget(self.btn_add_box, 0, 1)
-        tools_layout.addWidget(self.btn_add_layer, 0, 2)
+        # Ligne 2 : Options d'assistance (Snap)
+        # On met ça dans un layout horizontal pour bien aligner Checkbox et Champ texte
+        snap_container = QWidget()
+        snap_layout = QHBoxLayout(snap_container)
+        snap_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Placement de l'Auto-Track (Ligne 1, prend toute la largeur)
-        tools_layout.addWidget(self.btn_autotrack, 1, 0, 1, 3)
-
-        # --- Options d'Assistance (Snap) ---
-        snap_layout = QHBoxLayout()
-        self.check_snap = QCheckBox("Snap (Aimant)")
+        self.check_snap = QCheckBox("Aimant (Snap)")
         self.spin_snap_window = QLineEdit("10")
         self.spin_snap_window.setFixedWidth(40)
         self.spin_snap_window.setValidator(QIntValidator(1, 100))
+        self.spin_snap_window.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         snap_layout.addWidget(self.check_snap)
+        snap_layout.addStretch() # Pousse le reste à droite
         snap_layout.addWidget(QLabel("Fenêtre (px):"))
         snap_layout.addWidget(self.spin_snap_window)
         
-        # Ajout des options Snap (Ligne 2)
-        tools_layout.addLayout(snap_layout, 2, 0, 1, 3) 
+        tools_grid.addWidget(snap_container, 2, 0, 1, 3)
 
-        tools_group.setLayout(tools_layout)
+        # Ajout du groupe au layout principal
         layout.addWidget(tools_group)
-        
-        # Instructions
+        # ------------------------------------------------------------------
+
+        # Instructions (Petit texte sous la boîte)
         self.lbl_instruction = QLabel("Sélectionnez un outil...")
-        self.lbl_instruction.setStyleSheet("color: gray; font-style: italic; margin-bottom: 10px;")
+        self.lbl_instruction.setStyleSheet("color: #666; font-style: italic; margin: 5px;")
         self.lbl_instruction.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_instruction)
-        
-        # Liste et Actions (Inchangé)
+
+        # Liste des objets
         layout.addWidget(QLabel("Liste des annotations :"))
         self.picks_list_widget = QListWidget()
         layout.addWidget(self.picks_list_widget)
         
+        # Actions (Boutons du bas)
         actions_layout = QHBoxLayout()
         self.delete_pick_button = QPushButton("Supprimer")
         self.delete_pick_button.clicked.connect(self.on_delete_pick_clicked)
-        self.export_picks_button = QPushButton("Exporter CSV...")
+        
+        self.export_picks_button = QPushButton("Exporter CSV")
         self.export_picks_button.clicked.connect(self.on_export_picks_clicked)
+        
         actions_layout.addWidget(self.delete_pick_button)
         actions_layout.addWidget(self.export_picks_button)
         layout.addLayout(actions_layout)
@@ -4306,10 +4268,6 @@ class Traitement():
         # ::-1 -> prend toutes les colonnes (les traces) mais avec un pas de -1,
         # ce qui inverse leur ordre.
         self.data = self.data[:, ::-1]
-
-# Assurez-vous d'avoir les imports en haut du fichier :
-# import matplotlib.patches as patches
-# from matplotlib.collections import PathCollection
 
 class Graphique():
     def __init__(self, ax : plt.Axes, fig : Figure):
